@@ -39,13 +39,18 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="sticky top-0 z-50 w-full border-b border-[#B3A2DB]/30 bg-[#5E2CB2]/90 backdrop-blur-md transition-all">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-        {/* Left: Logo with electric cyan dot */}
+        {/* Left: Logo with mascot icon */}
         <Link
           to="/"
           id="header-logo"
           className="group flex items-center gap-2.5 transition-transform duration-150 hover:scale-[1.01]"
         >
-          <span className="h-2.5 w-2.5 rounded-full bg-[#00C6FF] shadow-sm shadow-[#00C6FF]/60" />
+          <img
+            src="/favicon.png"
+            alt="MATCH&SIP Mascot"
+            className="h-8 w-8 rounded-full border border-[#00C6FF]/50 bg-white object-contain p-0.5 shadow-sm"
+            referrerPolicy="no-referrer"
+          />
           <span className="font-heading text-xl font-black tracking-tight text-[#FFFFFF] uppercase">
             MATCH&amp;SIP
           </span>
