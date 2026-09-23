@@ -1,0 +1,18 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /bookings/{bookingId} {
+      // Allow reading bookings so real-time slot availability displays to all players
+      allow read: if true;
+      // Allow customers to submit reservations with required fields
+      allow create: if request.resource.data.bookingReference is string
+                    && request.resource.data.selectedDate is string
+                    && request.resource.data.customer.fullName is string
+                    && request.resource.data.customer.phoneNumber is string
+                    && request.resource.data.slots is list
+                    && request.resource.data.totalAmount is number;
+      // Allow updates and deletions for booking management
+      allow update, delete: if true;
+    }
+  }
+}

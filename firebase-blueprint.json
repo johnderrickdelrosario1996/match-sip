@@ -1,0 +1,70 @@
+{
+  "entities": {
+    "booking": {
+      "title": "Booking",
+      "description": "Court reservation records with time slots, customer info, and payment status",
+      "type": "object",
+      "properties": {
+        "bookingReference": {
+          "type": "string",
+          "description": "Unique booking reference code, e.g. MS-123456"
+        },
+        "selectedDate": {
+          "type": "string",
+          "description": "Date of reservation in YYYY-MM-DD format"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Payment method used, e.g. InstaPay QR"
+        },
+        "customer": {
+          "type": "object",
+          "properties": {
+            "fullName": { "type": "string" },
+            "phoneNumber": { "type": "string" },
+            "email": { "type": "string" }
+          },
+          "required": ["fullName", "phoneNumber"]
+        },
+        "slots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "slotId": { "type": "string" },
+              "courtId": { "type": "string" },
+              "courtName": { "type": "string" },
+              "timeLabel": { "type": "string" },
+              "date": { "type": "string" },
+              "price": { "type": "number" }
+            },
+            "required": ["slotId", "courtId", "courtName", "timeLabel", "date", "price"]
+          }
+        },
+        "totalAmount": {
+          "type": "number",
+          "description": "Total reservation fee in PHP"
+        },
+        "paymentProofUrl": {
+          "type": "string",
+          "description": "Firebase Storage public download URL of uploaded payment receipt"
+        },
+        "status": {
+          "type": "string",
+          "description": "Verification status: CONFIRMED, VERIFIED, or PENDING"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of when the booking was created"
+        }
+      },
+      "required": ["bookingReference", "selectedDate", "customer", "slots", "totalAmount", "status"]
+    }
+  },
+  "firestore": {
+    "/bookings/{bookingId}": {
+      "entity": "booking",
+      "description": "Individual court reservations"
+    }
+  }
+}
