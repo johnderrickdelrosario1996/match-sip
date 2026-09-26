@@ -157,7 +157,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#5E2CB2] text-[#FFFFFF] flex flex-col selection:bg-[#00C6FF] selection:text-black">
       {/* Top Header */}
-      {!isBookingsPage && (
+      {!isBookingsPage && location.pathname !== '/checkout/gcash-pay' && (
         <Header
           onPlayTodayClick={handlePlayTodayClick}
           selectedSlotsCount={selectedSlots.length}

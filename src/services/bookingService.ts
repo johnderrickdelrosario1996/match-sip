@@ -50,7 +50,7 @@ export async function saveBookingToFirestore(booking: ConfirmedBooking): Promise
   await setDoc(bookingRef, {
     bookingReference: booking.bookingReference,
     selectedDate: booking.selectedDate,
-    paymentMethod: booking.paymentMethod || 'InstaPay QR',
+    paymentMethod: booking.paymentMethod || 'GCash (PayMongo)',
     customer: {
       fullName: booking.customer.fullName,
       phoneNumber: booking.customer.phoneNumber,
@@ -66,7 +66,7 @@ export async function saveBookingToFirestore(booking: ConfirmedBooking): Promise
     })),
     totalAmount: booking.totalAmount,
     paymentProofUrl: booking.paymentProofUrl || '',
-    status: booking.status || 'VERIFIED',
+    status: booking.status || 'BOOKED',
     createdAt: booking.createdAt || new Date().toISOString(),
     serverTimestamp: serverTimestamp(),
   });
@@ -166,4 +166,100 @@ export function subscribeToBookings(
   );
 
   return unsubscribe;
+}
+
+/**
+ * Call the backend checkout creation endpoint (/api/create-checkout)
+ * Integrates PayMongo Checkout Session or Source when user clicks BOOK RESERVATION.
+ */
+export async function createPaymongoCheckout(booking: ConfirmedBooking): Promise<{
+  success: boolean;
+  checkoutUrl: string;
+  qrCodeUrl: string;
+  bookingReference: string;
+  provider: string;
+  isLive: boolean;
+  error?: string;
+}> {
+  try {
+    const response = await fetch('/api/create-checkout', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ booking }),
+    });
+
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || 'Failed to initialize payment checkout.');
+    }
+
+    return data;
+  } catch (err: any) {
+    console.error('Error creating payment checkout session:', err);
+    throw err;
+  }
+}
+
+/**
+ * Simulate GCash webhook payment approval for test/sandbox mode
+ */
+export async function simulatePaymongoPayment(bookingReference: string): Promise<boolean> {
+  try {
+    const response = await fetch('/api/payment/simulate-pay', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ bookingReference }),
+    });
+    const data = await response.json();
+    return Boolean(data.success);
+  } catch (err) {
+    console.error('Error simulating payment:', err);
+    return false;
+  }
+}
+
+/**
+ * Real-time listener for a single booking document to detect when status flips to 'BOOKED'
+ */
+export function subscribeToSingleBooking(
+  bookingReference: string,
+  onUpdate: (booking: ConfirmedBooking | null) => void
+): () => void {
+  const bookingRef = doc(db, BOOKINGS_COLLECTION, bookingReference);
+  return onSnapshot(
+    bookingRef,
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate(null);
+        return;
+      }
+      const data = snap.data();
+      onUpdate({
+        id: snap.id,
+        bookingReference: data.bookingReference || snap.id,
+        selectedDate: data.selectedDate,
+        paymentMethod: data.paymentMethod || 'GCash (PayMongo)',
+        customer: {
+          fullName: data.customer?.fullName || '',
+          phoneNumber: data.customer?.phoneNumber || '',
+          email: data.customer?.email || '',
+          notes: data.customer?.notes || '',
+        },
+        slots: Array.isArray(data.slots) ? data.slots : [],
+        totalAmount: Number(data.totalAmount) || 0,
+        paymentProofUrl: data.paymentProofUrl || '',
+        status: data.status || 'PENDING',
+        createdAt: data.createdAt || '',
+        paidAt: data.paidAt || '',
+        paymentId: data.paymentId || '',
+      });
+    },
+    (err) => {
+      console.warn('Single booking subscription error:', err);
+    }
+  );
 }

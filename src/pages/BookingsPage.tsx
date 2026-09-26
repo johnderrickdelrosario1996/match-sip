@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -18,6 +18,7 @@ import {
   Check,
   Lock,
   Mail,
+  ArrowUpDown,
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
 import { 
@@ -26,6 +27,8 @@ import {
   sendAdminBookingNotification,
 } from '../services/bookingService';
 import { EditBookingModal } from '../components/EditBookingModal';
+import { CalendarPopup } from '../components/CalendarPopup';
+import { getTodayDateString, formatDateToDDMMYYYY, formatDateToFullReadable } from '../utils/dateUtils';
 
 interface BookingsPageProps {
   persistedBookings: ConfirmedBooking[];
@@ -58,6 +61,9 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProof, setSelectedProof] = useState<string | null>(null);
   const [filterDate, setFilterDate] = useState<string>('all');
+  const [filterCategory, setFilterCategory] = useState<'all' | 'today' | 'upcoming' | 'past'>('all');
+  const [sortOrder, setSortOrder] = useState<'present-first' | 'newest-first' | 'oldest-first'>('present-first');
+  const [isCalendarOpen, setIsCalendarOpen] = useState<boolean>(false);
   const [deletingBookingId, setDeletingBookingId] = useState<string | null>(null);
   const [editingBooking, setEditingBooking] = useState<ConfirmedBooking | null>(null);
   const [toastNotification, setToastNotification] = useState<string | null>(null);
@@ -163,29 +169,141 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   }, [isAuthenticated]);
 
   // ---------------------------------------------------------
-  // FILTER BOOKINGS
+  // TODAY'S DATE REFERENCE
   // ---------------------------------------------------------
-  const filteredBookings = persistedBookings.filter((booking) => {
-    const matchesDate =
-      filterDate === 'all' || booking.selectedDate === filterDate;
+  const todayStr = getTodayDateString();
 
-    if (!matchesDate) {
-      return false;
-    }
+  // ---------------------------------------------------------
+  // CATEGORY METRIC COUNTS
+  // ---------------------------------------------------------
+  const todayBookingsCount = useMemo(() => {
+    return persistedBookings.filter((b) => b.selectedDate === todayStr).length;
+  }, [persistedBookings, todayStr]);
 
-    const query = searchTerm.toLowerCase().trim();
+  const upcomingBookingsCount = useMemo(() => {
+    return persistedBookings.filter((b) => (b.selectedDate || '') > todayStr).length;
+  }, [persistedBookings, todayStr]);
 
-    if (!query) {
-      return true;
-    }
+  const pastBookingsCount = useMemo(() => {
+    return persistedBookings.filter((b) => (b.selectedDate || '') < todayStr).length;
+  }, [persistedBookings, todayStr]);
 
-    return (
-      (booking.bookingReference || '').toLowerCase().includes(query) ||
-      (booking.customer?.fullName || '').toLowerCase().includes(query) ||
-      (booking.customer?.phoneNumber || '').toLowerCase().includes(query) ||
-      (booking.selectedDate || '').toLowerCase().includes(query)
-    );
-  });
+  // ---------------------------------------------------------
+  // FILTER AND CHRONOLOGICALLY SORT BOOKINGS
+  // Places the most present schedule of booking at the top,
+  // followed by upcoming, and past booking schedules at the bottom.
+  // ---------------------------------------------------------
+  const filteredBookings = useMemo(() => {
+    // 1. Filter
+    const filtered = persistedBookings.filter((booking) => {
+      // Category filter
+      if (filterCategory === 'today' && booking.selectedDate !== todayStr) {
+        return false;
+      }
+      if (filterCategory === 'upcoming' && (booking.selectedDate || '') <= todayStr) {
+        return false;
+      }
+      if (filterCategory === 'past' && (booking.selectedDate || '') >= todayStr) {
+        return false;
+      }
+
+      // Specific Date filter
+      const matchesDate =
+        filterDate === 'all' || booking.selectedDate === filterDate;
+      if (!matchesDate) {
+        return false;
+      }
+
+      // Search query filter
+      const query = searchTerm.toLowerCase().trim();
+      if (!query) {
+        return true;
+      }
+
+      return (
+        (booking.bookingReference || '').toLowerCase().includes(query) ||
+        (booking.customer?.fullName || '').toLowerCase().includes(query) ||
+        (booking.customer?.phoneNumber || '').toLowerCase().includes(query) ||
+        (booking.selectedDate || '').toLowerCase().includes(query)
+      );
+    });
+
+    // Helper: extract earliest start time from reserved slots
+    const getStartTime = (b: ConfirmedBooking): string => {
+      if (!b.slots || b.slots.length === 0) return '00:00';
+      const times: string[] = [];
+      for (const s of b.slots) {
+        if (s.timeLabel) {
+          const match = s.timeLabel.match(/^(\d{1,2}:\d{2})/);
+          if (match) {
+            const [h, m] = match[1].split(':');
+            times.push(`${h.padStart(2, '0')}:${m}`);
+          }
+        }
+      }
+      if (times.length === 0) return '00:00';
+      times.sort();
+      return times[0];
+    };
+
+    // 2. Sort chronologically
+    return [...filtered].sort((a, b) => {
+      const dateA = a.selectedDate || '';
+      const dateB = b.selectedDate || '';
+      const timeA = getStartTime(a);
+      const timeB = getStartTime(b);
+
+      if (sortOrder === 'present-first') {
+        // Primary: Most present schedule of booking is placed at the top,
+        // and the past booking schedules at the bottom.
+        // Rank 0: Today (the most present schedule)
+        // Rank 1: Upcoming (future schedules in chronological order)
+        // Rank 2: Past (past schedules in reverse chronological order)
+        const getRank = (d: string) => {
+          if (d === todayStr) return 0;
+          if (d > todayStr) return 1;
+          return 2;
+        };
+
+        const rankA = getRank(dateA);
+        const rankB = getRank(dateB);
+
+        if (rankA !== rankB) {
+          return rankA - rankB;
+        }
+
+        // Within Today (rank 0): chronological by slot time (08:00 -> 24:00)
+        if (rankA === 0) {
+          if (timeA !== timeB) return timeA.localeCompare(timeB);
+          return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+        }
+
+        // Within Upcoming (rank 1): chronological by date ascending, then slot time
+        if (rankA === 1) {
+          if (dateA !== dateB) return dateA.localeCompare(dateB);
+          if (timeA !== timeB) return timeA.localeCompare(timeB);
+          return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+        }
+
+        // Within Past (rank 2): most recent past day first down to older past dates
+        if (dateA !== dateB) return dateB.localeCompare(dateA);
+        if (timeA !== timeB) return timeA.localeCompare(timeB);
+        return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+      }
+
+      if (sortOrder === 'newest-first') {
+        // Date descending, then time
+        if (dateA !== dateB) return dateB.localeCompare(dateA);
+        if (timeA !== timeB) return timeB.localeCompare(timeA);
+        return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+      }
+
+      // 'oldest-first'
+      if (dateA !== dateB) return dateA.localeCompare(dateB);
+      if (timeA !== timeB) return timeA.localeCompare(timeB);
+      return (a.createdAt || a.bookingReference).localeCompare(b.createdAt || b.bookingReference);
+    });
+  }, [persistedBookings, filterCategory, filterDate, searchTerm, sortOrder, todayStr]);
 
   // ---------------------------------------------------------
   // CALCULATE METRICS
@@ -201,7 +319,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   );
 
   // ---------------------------------------------------------
-  // DISTINCT DATES
+  // DISTINCT DATES (Sorted descending: most present date first)
   // ---------------------------------------------------------
   const uniqueDates = Array.from(
     new Set(
@@ -209,7 +327,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         .map((booking) => booking.selectedDate)
         .filter(Boolean)
     )
-  ).sort();
+  ).sort((a, b) => b.localeCompare(a));
 
   // ---------------------------------------------------------
   // DELETE BOOKING
@@ -455,68 +573,159 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         {/* ===================================================
             SEARCH & FILTER BAR
         ==================================================== */}
-        <div className="mb-8 flex flex-col items-stretch justify-between gap-4 sm:flex-row sm:items-center">
+        <div className="mb-8 space-y-4">
+          <div className="flex flex-col items-stretch justify-between gap-4 lg:flex-row lg:items-center">
 
-          {/* SEARCH */}
-          <div className="relative max-w-md flex-1">
+            {/* SEARCH */}
+            <div className="relative max-w-md flex-1">
+              <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#B3A2DB]" />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder="Search reference #, player name, phone..."
+                className="w-full rounded-full border border-[#B3A2DB]/40 bg-white/10 py-2.5 pl-10 pr-10 text-xs font-medium text-white shadow-inner transition-all placeholder:text-[#B3A2DB]/60 focus:border-[#00C6FF] focus:bg-white/15 focus:outline-none sm:text-sm"
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/50 transition-colors hover:text-white"
+                  aria-label="Clear search"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
 
-            <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#B3A2DB]" />
-
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Search reference #, player name, phone..."
-              className="w-full rounded-full border border-[#B3A2DB]/40 bg-white/10 py-2.5 pl-10 pr-10 text-xs font-medium text-white shadow-inner transition-all placeholder:text-[#B3A2DB]/60 focus:border-[#00C6FF] focus:bg-white/15 focus:outline-none sm:text-sm"
-            />
-
-            {searchTerm && (
-              <button
-                type="button"
-                onClick={() => setSearchTerm('')}
-                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/50 transition-colors hover:text-white"
-                aria-label="Clear search"
+            {/* SORT SELECTOR */}
+            <div className="flex items-center gap-2">
+              <span className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[#B3A2DB] shrink-0">
+                <ArrowUpDown className="h-3.5 w-3.5 text-[#00C6FF]" />
+                Sort:
+              </span>
+              <select
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value as any)}
+                className="rounded-full border border-[#B3A2DB]/40 bg-[#1A0B2E]/80 px-3.5 py-1.5 text-xs font-bold text-white shadow-sm transition-all focus:border-[#00C6FF] focus:outline-none cursor-pointer"
               >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
+                <option value="present-first" className="bg-[#1A0B2E] text-white">
+                  Present Schedule First (Today → Upcoming → Past)
+                </option>
+                <option value="newest-first" className="bg-[#1A0B2E] text-white">
+                  Newest Date First (Descending)
+                </option>
+                <option value="oldest-first" className="bg-[#1A0B2E] text-white">
+                  Oldest Date First (Ascending)
+                </option>
+              </select>
+            </div>
 
           </div>
 
-          {/* DATE FILTER */}
-          {uniqueDates.length > 0 && (
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-
+          {/* SCHEDULE CATEGORY TABS & CALENDAR BUTTON */}
+          <div className="flex flex-col gap-2.5 pt-1 border-t border-white/10">
+            {/* Category Tabs and Calendar Button */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 flex-wrap sm:flex-nowrap">
               <button
                 type="button"
-                onClick={() => setFilterDate('all')}
-                className={`cursor-pointer whitespace-nowrap rounded-full px-3 py-1 text-xs font-bold transition-colors ${
-                  filterDate === 'all'
-                    ? 'bg-[#00C6FF] text-black'
+                onClick={() => {
+                  setFilterCategory('all');
+                  setFilterDate('all');
+                }}
+                className={`cursor-pointer whitespace-nowrap rounded-full px-3.5 py-1.5 text-xs font-black uppercase tracking-wider transition-colors ${
+                  filterCategory === 'all' && filterDate === 'all'
+                    ? 'bg-[#00C6FF] text-black shadow-md shadow-[#00C6FF]/30'
                     : 'bg-white/10 text-white hover:bg-white/20'
                 }`}
               >
-                All Dates
+                All Bookings ({persistedBookings.length})
               </button>
 
-              {uniqueDates.map((date) => (
-                <button
-                  key={date}
-                  type="button"
-                  onClick={() => setFilterDate(date)}
-                  className={`cursor-pointer whitespace-nowrap rounded-full px-3 py-1 text-xs font-bold transition-colors ${
-                    filterDate === date
-                      ? 'bg-[#00C6FF] text-black'
-                      : 'bg-white/10 text-white hover:bg-white/20'
-                  }`}
-                >
-                  {date}
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterCategory('today');
+                  setFilterDate('all');
+                }}
+                className={`cursor-pointer whitespace-nowrap rounded-full px-3.5 py-1.5 text-xs font-black uppercase tracking-wider transition-colors flex items-center gap-1.5 ${
+                  filterCategory === 'today'
+                    ? 'bg-[#00C6FF] text-black shadow-md shadow-[#00C6FF]/30'
+                    : 'bg-white/10 text-white hover:bg-white/20'
+                }`}
+              >
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Today's Schedule ({todayBookingsCount})</span>
+              </button>
 
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterCategory('upcoming');
+                  setFilterDate('all');
+                }}
+                className={`cursor-pointer whitespace-nowrap rounded-full px-3.5 py-1.5 text-xs font-black uppercase tracking-wider transition-colors ${
+                  filterCategory === 'upcoming'
+                    ? 'bg-[#00C6FF] text-black shadow-md shadow-[#00C6FF]/30'
+                    : 'bg-white/10 text-white hover:bg-white/20'
+                }`}
+              >
+                Upcoming ({upcomingBookingsCount})
+              </button>
+
+              {/* CALENDAR BUTTON TO VIEW CALENDAR & NAVIGATE PAST BOOKINGS */}
+              <button
+                type="button"
+                onClick={() => setIsCalendarOpen(true)}
+                className={`cursor-pointer whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 border shadow-sm ${
+                  filterDate !== 'all'
+                    ? 'bg-[#00C6FF] text-black border-[#00C6FF] shadow-md shadow-[#00C6FF]/30 scale-[1.02]'
+                    : 'bg-white/10 text-white border-white/20 hover:bg-white/20 hover:border-[#00C6FF]/60'
+                }`}
+                title="Open calendar to view and navigate past bookings by date"
+                aria-label="Open Calendar"
+              >
+                <Calendar className={`h-3.5 w-3.5 ${filterDate !== 'all' ? 'text-black' : 'text-[#00C6FF]'}`} />
+                <span>
+                  {filterDate !== 'all' ? `Date: ${formatDateToDDMMYYYY(filterDate)}` : 'Calendar & Past Dates'}
+                </span>
+                {filterDate !== 'all' && (
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setFilterDate('all');
+                    }}
+                    className="ml-0.5 rounded-full bg-black/20 hover:bg-black/30 p-0.5 text-black cursor-pointer"
+                    title="Clear date filter"
+                  >
+                    <X className="h-3 w-3" />
+                  </span>
+                )}
+              </button>
             </div>
-          )}
 
+            {/* Active Date Filter Banner */}
+            {filterDate !== 'all' && (
+              <div className="flex items-center justify-between gap-3 rounded-2xl border border-[#00C6FF]/40 bg-[#00C6FF]/10 px-4 py-2 text-xs text-white">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-[#00C6FF] animate-pulse" />
+                  <span className="text-[#B3A2DB]">Viewing Bookings for:</span>
+                  <strong className="text-white font-black">{formatDateToFullReadable(filterDate)}</strong>
+                  <span className="text-[#00C6FF] font-semibold">
+                    ({filteredBookings.length} {filteredBookings.length === 1 ? 'booking' : 'bookings'} found)
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFilterDate('all')}
+                  className="inline-flex items-center gap-1 font-bold text-xs text-[#00C6FF] hover:underline cursor-pointer"
+                >
+                  <X className="h-3 w-3" />
+                  <span>Show All</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* ===================================================
@@ -616,12 +825,12 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
 
                       <div className="flex items-center gap-1.5 shrink-0">
                         <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-black uppercase ${
-                          booking.status === 'CONFIRMED' || booking.status === 'VERIFIED'
+                          booking.status === 'BOOKED' || booking.status === 'CONFIRMED' || booking.status === 'VERIFIED'
                             ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
                             : 'border-amber-300 bg-amber-100 text-amber-800'
                         }`}>
                           <CheckCircle2 className="h-3 w-3" />
-                          <span>{booking.status || 'CONFIRMED'}</span>
+                          <span>{booking.status || 'BOOKED'}</span>
                         </span>
 
                         {/* RESEND EMAIL NOTIFICATION BUTTON */}
@@ -707,17 +916,32 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
                     {/* DATE & RESERVED SLOTS */}
                     <div className="mt-2 border-t border-[#B3A2DB]/20 pt-3">
 
-                      <div className="mb-2 flex items-center justify-between text-xs font-bold text-[#5E2CB2]/80">
+                      <div className="mb-2 flex items-center justify-between text-xs font-bold text-[#5E2CB2]/80 gap-2 flex-wrap">
 
-                        <span className="flex items-center gap-1.5">
-
-                          <Calendar className="h-3.5 w-3.5 text-[#5E2CB2]" />
-
-                          <span>
-                            {booking.selectedDate || 'No date'}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="flex items-center gap-1.5 font-bold text-[#5E2CB2]">
+                            <Calendar className="h-3.5 w-3.5 text-[#5E2CB2]" />
+                            <span>
+                              {booking.selectedDate || 'No date'}
+                            </span>
                           </span>
 
-                        </span>
+                          {/* Present / Upcoming / Past Schedule Badge */}
+                          {booking.selectedDate === todayStr ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-[#00C6FF]/15 border border-[#00C6FF]/40 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#007da6]">
+                              <span className="h-1.5 w-1.5 rounded-full bg-[#00C6FF] animate-pulse" />
+                              Today's Schedule
+                            </span>
+                          ) : (booking.selectedDate || '') > todayStr ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-[#5E2CB2]/10 border border-[#5E2CB2]/25 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#5E2CB2]">
+                              Upcoming
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
+                              Past Schedule
+                            </span>
+                          )}
+                        </div>
 
                         <span className="rounded-full bg-[#5E2CB2]/10 px-2 py-0.5 text-[10px] font-black">
                           {booking.slots?.length || 0}{' '}
@@ -787,8 +1011,8 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
 
                     ) : (
 
-                      <span className="text-[11px] font-medium italic text-[#5E2CB2]/60">
-                        InstaPay QR
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#007DFE]/15 text-[#007DFE] px-2.5 py-1 text-[10px] font-black uppercase">
+                        {booking.paymentMethod || 'GCash (PayMongo)'}
                       </span>
 
                     )}
@@ -886,6 +1110,25 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         booking={editingBooking}
         onClose={() => setEditingBooking(null)}
         onSave={handleSaveEdit}
+      />
+
+      {/* =====================================================
+          CALENDAR POPUP (NAVIGATE PAST BOOKINGS BY DATE)
+      ====================================================== */}
+      <CalendarPopup
+        isOpen={isCalendarOpen}
+        onClose={() => setIsCalendarOpen(false)}
+        selectedDate={filterDate !== 'all' ? filterDate : todayStr}
+        onSelectDate={(dateStr) => {
+          setFilterDate(dateStr);
+          setFilterCategory('all');
+          setIsCalendarOpen(false);
+        }}
+        currentTodayStr={todayStr}
+        allowPastDates={true}
+        bookingDates={uniqueDates}
+        title="CALENDAR & PAST BOOKINGS"
+        subtitle="Select any past or present date to navigate and view its court bookings"
       />
 
       {/* =====================================================

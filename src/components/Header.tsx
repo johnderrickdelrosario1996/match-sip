@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { Menu, X, CalendarCheck } from 'lucide-react';
+import { Menu, X, CalendarCheck, MapPin } from 'lucide-react';
 
 interface HeaderProps {
   onPlayTodayClick?: () => void;
@@ -85,7 +85,6 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="mx-auto max-w-7xl flex flex-col gap-4">
             <div className="flex items-center justify-between pb-3 border-b border-[#B3A2DB]/20">
               <span className="text-xs font-bold uppercase tracking-widest text-[#00C6FF]">Navigation</span>
-              <span className="text-xs text-[#B3A2DB]">Daily 08:00 – 23:00</span>
             </div>
 
             <Link
@@ -97,10 +96,30 @@ export const Header: React.FC<HeaderProps> = ({
                 <CalendarCheck className="h-4 w-4 text-[#00C6FF]" />
                 <span>Court Booking (Home)</span>
               </span>
-              <span className="text-xs text-[#00C6FF] font-mono">
-                {selectedSlotsCount > 0 ? `${selectedSlotsCount} Selected` : 'Court 01 & 02'}
-              </span>
             </Link>
+
+            <button
+              type="button"
+              onClick={() => {
+                setMobileMenuOpen(false);
+                if (location.pathname !== '/') {
+                  navigate('/');
+                  setTimeout(() => {
+                    const el = document.getElementById('find-us');
+                    if (el) el.scrollIntoView({ behavior: 'smooth' });
+                  }, 120);
+                } else {
+                  const el = document.getElementById('find-us');
+                  if (el) el.scrollIntoView({ behavior: 'smooth' });
+                }
+              }}
+              className="flex items-center justify-between text-left py-2 font-bold text-[#FFFFFF] hover:text-[#00C6FF] transition-colors cursor-pointer"
+            >
+              <span className="flex items-center gap-2">
+                <MapPin className="h-4 w-4 text-[#00C6FF]" />
+                <span>Find Us &amp; Directions</span>
+              </span>
+            </button>
 
             <div className="pt-2">
               <button

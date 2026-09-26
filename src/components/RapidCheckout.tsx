@@ -24,6 +24,23 @@ interface RapidCheckoutProps {
   onNavigateToMatrix: () => void;
 }
 
+const COURT_SAFETY_RULES = [
+  { num: '01', text: 'Warm up and stretch before playing.' },
+  { num: '02', text: 'Wear appropriate sports attire and non-marking court shoes.' },
+  { num: '03', text: 'Inspect the playing area before starting; report wet surfaces, loose nets, or hazards immediately.' },
+  { num: '04', text: 'Stay aware of your surroundings (partner, opponents, equipment, court boundaries).' },
+  { num: '05', text: 'Avoid reckless play; do not intentionally hit the ball toward another person at close range.' },
+  { num: '06', text: 'Do not enter another court while a rally is in progress.' },
+  { num: '07', text: 'Retrieve loose balls carefully and signal before entering another court.' },
+  { num: '08', text: 'Use equipment properly (no swinging paddles dangerously, throwing equipment, or climbing on nets).' },
+  { num: '09', text: 'Stop playing immediately if you feel unwell, dizzy, experience chest pain, or have trouble breathing.' },
+  { num: '10', text: 'Know your physical limits and assess your condition safely.' },
+  { num: '11', text: 'Keep personal items (bags, bottles, paddles) in designated areas outside the court boundaries.' },
+  { num: '12', text: 'Report all accidents and hazards immediately to court staff.' },
+  { num: '13', text: 'No smoking / vaping: Smoking, vaping, or using e-cigarettes is strictly prohibited anywhere within the court premises.' },
+  { num: '14', text: 'No food and drinks shall be allowed inside the court area.' },
+];
+
 export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
   selectedDate,
   selectedSlots,
@@ -845,49 +862,65 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
       {/* Court Safety Reminders Modal */}
       {showSafetyModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-          <div className="relative w-full max-w-lg rounded-2xl border border-[#B3A2DB]/50 bg-[#5E2CB2] p-6 text-[#FFFFFF] shadow-2xl">
-            <button
-              onClick={() => setShowSafetyModal(false)}
-              className="absolute top-4 right-4 text-[#B3A2DB] hover:text-[#FFFFFF]"
-            >
-              <X className="h-5 w-5" />
-            </button>
+          <div className="relative w-full max-w-xl max-h-[90vh] flex flex-col rounded-3xl border border-[#00C6FF]/40 bg-[#5E2CB2] p-5 sm:p-7 text-[#FFFFFF] shadow-2xl shadow-black/60">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-[#B3A2DB]/20 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-[#00C6FF]/15 border border-[#00C6FF]/30 flex items-center justify-center shrink-0">
+                  <ShieldCheck className="h-5 w-5 text-[#00C6FF]" />
+                </div>
+                <div>
+                  <h3 className="font-heading text-lg sm:text-xl font-black uppercase tracking-tight text-[#FFFFFF] leading-tight">
+                    Pickleball Court Safety Reminders
+                  </h3>
+                  <span className="text-[11px] font-bold tracking-wider uppercase text-[#00C6FF]">
+                    14 Mandatory Safety Guidelines
+                  </span>
+                </div>
+              </div>
 
-            <div className="flex items-center gap-2.5 mb-4">
-              <ShieldCheck className="h-5 w-5 text-[#00C6FF]" />
-              <h3 className="font-heading text-lg font-bold text-[#FFFFFF]">
-                Pickleball Court Safety Reminders
-              </h3>
+              <button
+                type="button"
+                onClick={() => setShowSafetyModal(false)}
+                className="rounded-full p-2 text-[#B3A2DB] hover:text-[#FFFFFF] hover:bg-white/10 transition-colors cursor-pointer"
+                aria-label="Close safety reminders modal"
+              >
+                <X className="h-5 w-5" />
+              </button>
             </div>
 
-            <div className="space-y-3 text-xs sm:text-sm text-[#B3A2DB] leading-relaxed">
-              <p>
-                <strong className="text-[#FFFFFF]">1. Proper Footwear:</strong> Non-marking athletic court shoes are required at all times. Running shoes or black-soled boots are strictly prohibited on the playing surface.
-              </p>
-              <p>
-                <strong className="text-[#FFFFFF]">2. Clear the Kitchen:</strong> Keep stray balls off the playing perimeter. If a ball rolls onto an active court, immediately call &quot;Ball on Court&quot; and replay the rally.
-              </p>
-              <p>
-                <strong className="text-[#FFFFFF]">3. Warm-up &amp; Hydration:</strong> Warm up dynamically before hitting. Complimentary iced water is provided at court side; beverages should stay on tables outside baseline nets.
-              </p>
-              <p>
-                <strong className="text-[#FFFFFF]">4. Paddle Safety:</strong> Use wrist tethers where available and maintain safe court spacing during overhead smashes and poaching rallies.
-              </p>
-              <p>
-                <strong className="text-[#FFFFFF]">5. Non-Refundable Policy:</strong> Due to tight court scheduling, all bookings are non-refundable. Please arrive 10 minutes prior to your reserved slot.
-              </p>
+            {/* Scrollable Rules List */}
+            <div className="overflow-y-auto max-h-[58vh] pr-1.5 sm:pr-2.5 my-4 space-y-2.5">
+              {COURT_SAFETY_RULES.map((rule) => (
+                <div
+                  key={rule.num}
+                  className="group flex items-start gap-3 rounded-xl border border-[#B3A2DB]/25 bg-white/[0.05] hover:border-[#00C6FF]/40 hover:bg-white/[0.08] p-3 sm:p-3.5 transition-all"
+                >
+                  <span className="font-mono text-xs font-black px-2 py-0.5 rounded-md shrink-0 flex items-center justify-center min-w-[34px] mt-0.5 text-[#00C6FF] bg-[#00C6FF]/15 border border-[#00C6FF]/30">
+                    {rule.num}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs sm:text-sm text-[#FFFFFF]/95 leading-relaxed font-medium">
+                      {rule.text}
+                    </p>
+                  </div>
+                </div>
+              ))}
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setSafetyAgreed(true);
-                setShowSafetyModal(false);
-              }}
-              className="mt-6 w-full rounded-xl bg-[#00C6FF] py-3 text-center text-xs font-black uppercase tracking-wider text-black hover:bg-[#00C6FF]/90 font-bold"
-            >
-              I UNDERSTAND &amp; AGREE
-            </button>
+            {/* Modal Footer */}
+            <div className="pt-3 border-t border-[#B3A2DB]/20 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setSafetyAgreed(true);
+                  setShowSafetyModal(false);
+                }}
+                className="w-full rounded-xl bg-[#00C6FF] py-3.5 text-center text-xs sm:text-sm font-black uppercase tracking-wider text-black hover:bg-[#00C6FF]/90 shadow-lg shadow-[#00C6FF]/25 hover:scale-[1.01] active:scale-98 transition-all cursor-pointer font-bold"
+              >
+                I UNDERSTAND &amp; AGREE TO ALL RULES
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { HeroSection } from '../components/HeroSection';
 import { BookingMatrix } from '../components/BookingMatrix';
 import { RapidCheckout } from '../components/RapidCheckout';
+import { FindUsSection } from '../components/FindUsSection';
 import { TimeSlot, SelectedSlot, ConfirmedBooking } from '../types';
 
 interface HomePageProps {
@@ -67,6 +68,9 @@ export const HomePage: React.FC<HomePageProps> = ({
         onBookingComplete={onBookingComplete}
         onNavigateToMatrix={() => scrollToSection('court-matrix-section')}
       />
+
+      {/* 4. Find Us Section ("FIND OUR COURTS") with interactive map and directions */}
+      <FindUsSection />
     </div>
   );
 };

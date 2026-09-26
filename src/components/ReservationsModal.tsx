@@ -12,6 +12,7 @@ import {
   Database
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
+import { getTodayDateString } from '../utils/dateUtils';
 
 interface ReservationsModalProps {
   isOpen: boolean;
@@ -31,16 +32,69 @@ export const ReservationsModal: React.FC<ReservationsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const filteredBookings = bookings.filter((b) => {
-    const q = searchTerm.toLowerCase().trim();
-    if (!q) return true;
-    return (
-      b.bookingReference.toLowerCase().includes(q) ||
-      b.customer.fullName.toLowerCase().includes(q) ||
-      b.customer.phoneNumber.toLowerCase().includes(q) ||
-      b.selectedDate.includes(q)
-    );
-  });
+  const todayStr = getTodayDateString();
+
+  const getStartTime = (b: ConfirmedBooking): string => {
+    if (!b.slots || b.slots.length === 0) return '00:00';
+    const times: string[] = [];
+    for (const s of b.slots) {
+      if (s.timeLabel) {
+        const match = s.timeLabel.match(/^(\d{1,2}:\d{2})/);
+        if (match) {
+          const [h, m] = match[1].split(':');
+          times.push(`${h.padStart(2, '0')}:${m}`);
+        }
+      }
+    }
+    if (times.length === 0) return '00:00';
+    times.sort();
+    return times[0];
+  };
+
+  const filteredBookings = bookings
+    .filter((b) => {
+      const q = searchTerm.toLowerCase().trim();
+      if (!q) return true;
+      return (
+        b.bookingReference.toLowerCase().includes(q) ||
+        b.customer.fullName.toLowerCase().includes(q) ||
+        b.customer.phoneNumber.toLowerCase().includes(q) ||
+        b.selectedDate.includes(q)
+      );
+    })
+    .sort((a, b) => {
+      const dateA = a.selectedDate || '';
+      const dateB = b.selectedDate || '';
+      const timeA = getStartTime(a);
+      const timeB = getStartTime(b);
+
+      const getRank = (d: string) => {
+        if (d === todayStr) return 0;
+        if (d > todayStr) return 1;
+        return 2;
+      };
+
+      const rankA = getRank(dateA);
+      const rankB = getRank(dateB);
+
+      if (rankA !== rankB) return rankA - rankB;
+
+      if (rankA === 0) {
+        if (timeA !== timeB) return timeA.localeCompare(timeB);
+        return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+      }
+
+      if (rankA === 1) {
+        if (dateA !== dateB) return dateA.localeCompare(dateB);
+        if (timeA !== timeB) return timeA.localeCompare(timeB);
+        return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+      }
+
+      // Past
+      if (dateA !== dateB) return dateB.localeCompare(dateA);
+      if (timeA !== timeB) return timeA.localeCompare(timeB);
+      return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+    });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-md overflow-y-auto animate-in fade-in">

@@ -31,7 +31,7 @@ export interface CustomerDetails {
   proofPreviewUrl?: string;
 }
 
-export type PaymentVerificationStatus = 'VERIFIED' | 'CONFIRMED' | 'PENDING';
+export type PaymentVerificationStatus = 'BOOKED' | 'VERIFIED' | 'CONFIRMED' | 'PENDING';
 
 export interface ConfirmedBooking {
   id?: string;
@@ -40,11 +40,14 @@ export interface ConfirmedBooking {
   slots: SelectedSlot[];
   customer: CustomerDetails;
   totalAmount: number;
-  paymentMethod: 'InstaPay QR';
+  paymentMethod: 'GCash (PayMongo)' | 'GCash' | 'InstaPay QR' | string;
   bookedAt?: string;
   createdAt?: string;
+  paidAt?: string;
+  paymentId?: string;
   status: PaymentVerificationStatus | string;
   paymentProofUrl?: string;
+  checkoutUrl?: string;
 }
 
 export interface WeeklyEvent {

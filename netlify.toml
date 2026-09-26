@@ -6,6 +6,21 @@
   NODE_VERSION = "20"
 
 [[redirects]]
+  from = "/api/create-checkout"
+  to = "/.netlify/functions/create-checkout"
+  status = 200
+
+[[redirects]]
+  from = "/api/webhooks/payment"
+  to = "/.netlify/functions/payment-webhook"
+  status = 200
+
+[[redirects]]
+  from = "/api/payment/simulate-pay"
+  to = "/.netlify/functions/payment-webhook"
+  status = 200
+
+[[redirects]]
   from = "/api/notify-admin"
   to = "/.netlify/functions/notify-admin"
   status = 200

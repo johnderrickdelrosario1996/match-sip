@@ -1,17 +1,41 @@
 import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { Resend } from 'resend';
+import QRCode from 'qrcode';
+import { initializeApp, getApps } from 'firebase/app';
+import {
+  initializeFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
+import firebaseConfig from './firebase-applet-config.json';
 
 dotenv.config({ override: true });
+
+// Initialize Firebase App & Firestore for server operations
+const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const db = initializeFirestore(fbApp, {}, firebaseConfig.firestoreDatabaseId || undefined);
 
 const app = express();
 const PORT = 3000;
 // Strictly lock admin notifications exclusively to danamieratan@gmail.com
-const ADMIN_EMAIL = 'danamieratan@gmail.com';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'danamieratan@gmail.com';
 
-app.use(express.json({ limit: '10mb' }));
+// Capture raw body for webhook HMAC-SHA256 signature verification
+app.use(
+  express.json({
+    limit: '10mb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf.toString();
+    },
+  })
+);
 
 // Lazy Resend client initialization with dynamic key tracking
 let cachedApiKey = '';
@@ -35,43 +59,17 @@ function getMaskedKey(key?: string): string {
   return `${trimmed.slice(0, 5)}...${trimmed.slice(-4)}`;
 }
 
-// API Health Check & Resend Configuration Status
-app.get('/api/health', (req, res) => {
-  const currentKey = process.env.RESEND_API_KEY?.trim();
-  const currentFrom = process.env.RESEND_FROM_EMAIL?.trim() || 'MATCH and SIP <onboarding@resend.dev>';
-  
-  res.json({
-    status: 'ok',
-    resendConfigured: !!currentKey,
-    activeSender: currentFrom,
-    maskedApiKey: getMaskedKey(currentKey),
-    adminEmail: ADMIN_EMAIL,
-  });
-});
-
-// Admin Booking Notification Endpoint
-app.post('/api/notify-admin', async (req, res) => {
+/**
+ * Shared Admin Notification Email Sender
+ */
+async function sendAdminNotification(booking: any) {
   try {
-    const { booking } = req.body;
-
-    if (!booking || !booking.bookingReference) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid booking data provided.',
-      });
-    }
-
     const resend = getResendClient();
     if (!resend) {
       console.warn(
         `[MATCH&SIP] RESEND_API_KEY is not configured in environment. Skipping email dispatch to ${ADMIN_EMAIL}.`
       );
-      return res.json({
-        success: false,
-        skipped: true,
-        message:
-          'RESEND_API_KEY environment variable is not configured. Please add RESEND_API_KEY in Settings to enable live email delivery.',
-      });
+      return { success: false, skipped: true };
     }
 
     const {
@@ -80,7 +78,8 @@ app.post('/api/notify-admin', async (req, res) => {
       totalAmount,
       selectedDate,
       bookingReference,
-      paymentMethod,
+      paymentMethod = 'GCash (PayMongo)',
+      status = 'BOOKED',
     } = booking;
 
     const customerName = customer?.fullName || 'Guest Customer';
@@ -106,30 +105,29 @@ app.post('/api/notify-admin', async (req, res) => {
       )
       .join('');
 
-    const fromEmail =
-      process.env.RESEND_FROM_EMAIL || 'MATCH and SIP <onboarding@resend.dev>';
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'MATCH and SIP <onboarding@resend.dev>';
 
     const htmlContent = `
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="utf-8">
-      <title>New Court Reservation Confirmed</title>
+      <title>Court Reservation Confirmed (GCash)</title>
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
     </head>
     <body style="margin: 0; padding: 24px 0; background-color: #431E82; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #FFFFFF;">
       <div style="max-width: 600px; margin: 0 auto; background-color: #5E2CB2; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,0.18); box-shadow: 0 20px 40px rgba(0,0,0,0.3);">
         
         <!-- Header Banner -->
-        <div style="background: linear-gradient(135deg, #4A1E94 0%, #5E2CB2 100%); padding: 32px 28px 24px; border-bottom: 2px solid #00C6FF;">
-          <div style="display: inline-block; background-color: #00C6FF; color: #000000; font-size: 11px; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; padding: 4px 12px; border-radius: 9999px; margin-bottom: 12px;">
-            NEW BOOKING ALERT
+        <div style="background: linear-gradient(135deg, #00C6FF 0%, #0B63CE 100%); padding: 32px 28px 24px;">
+          <div style="display: inline-block; background-color: #000000; color: #00C6FF; font-size: 11px; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; padding: 4px 12px; border-radius: 9999px; margin-bottom: 12px;">
+            GCASH PAYMENT VERIFIED • ${status}
           </div>
           <h1 style="margin: 0; font-size: 26px; font-weight: 900; color: #FFFFFF; letter-spacing: -0.02em;">
-            MATCH<span style="color: #00C6FF;">&amp;</span>SIP
+            MATCH<span style="color: #ffd200;">&amp;</span>SIP
           </h1>
-          <p style="margin: 6px 0 0; color: rgba(255,255,255,0.75); font-size: 14px;">
-            A new court reservation has just been confirmed and stored in Cloud Firestore.
+          <p style="margin: 6px 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">
+            A new automated GCash court reservation has been verified and permanently updated to <strong>BOOKED</strong> in Cloud Firestore.
           </p>
         </div>
 
@@ -151,7 +149,6 @@ app.post('/api/notify-admin', async (req, res) => {
 
         <!-- Body Details -->
         <div style="padding: 28px;">
-          
           <!-- Customer Info Box -->
           <div style="background-color: rgba(0,0,0,0.18); border-radius: 14px; border: 1px solid rgba(255,255,255,0.1); padding: 20px; margin-bottom: 24px;">
             <h3 style="margin: 0 0 14px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #00C6FF; font-weight: 800;">
@@ -166,10 +163,13 @@ app.post('/api/notify-admin', async (req, res) => {
                 <td style="padding: 6px 0; color: rgba(255,255,255,0.6);">Phone Number:</td>
                 <td style="padding: 6px 0; color: #00C6FF; font-weight: 700;">${customerPhone}</td>
               </tr>
-              
               <tr>
-                <td style="padding: 6px 0; color: rgba(255,255,255,0.6);">Payment:</td>
-                <td style="padding: 6px 0; color: #FFFFFF; font-weight: 600;">${paymentMethod || 'InstaPay QR'}</td>
+                <td style="padding: 6px 0; color: rgba(255,255,255,0.6);">Payment Gateway:</td>
+                <td style="padding: 6px 0; color: #00C6FF; font-weight: 700;">${paymentMethod}</td>
+              </tr>
+              <tr>
+                <td style="padding: 6px 0; color: rgba(255,255,255,0.6);">Status:</td>
+                <td style="padding: 6px 0; color: #10B981; font-weight: 800;">${status}</td>
               </tr>
             </table>
           </div>
@@ -199,9 +199,9 @@ app.post('/api/notify-admin', async (req, res) => {
               <tr>
                 <td>
                   <span style="font-size: 11px; text-transform: uppercase; color: rgba(255,255,255,0.7); font-weight: 800; letter-spacing: 0.08em; display: block;">
-                    Total Amount Paid / Due
+                    Total Amount Verified
                   </span>
-                  <span style="font-size: 12px; color: #00C6FF;">Status: Confirmed</span>
+                  <span style="font-size: 12px; color: #10B981; font-weight: 700;">Status: ${status}</span>
                 </td>
                 <td style="text-align: right; font-size: 26px; font-weight: 900; color: #FFFFFF; text-shadow: 0 2px 10px rgba(0,198,255,0.4);">
                   ${formattedAmount}
@@ -223,53 +223,464 @@ app.post('/api/notify-admin', async (req, res) => {
     `;
 
     const textContent = `
-NEW BOOKING ALERT - MATCH&SIP
-=============================
+NEW GCASH BOOKING CONFIRMED - MATCH&SIP
+=======================================
 Reference Code: #${bookingReference}
 Date: ${selectedDate || 'Today'}
+Status: ${status}
 
 CUSTOMER DETAILS:
 - Name: ${customerName}
 - Phone Number: ${customerPhone}
-- Payment Method: ${paymentMethod || 'InstaPay QR'}
+- Payment: ${paymentMethod}
 
 RESERVED SLOTS:
 ${slotsListText}
 
 TOTAL AMOUNT: ${formattedAmount}
-STATUS: Confirmed
 `;
 
     const emailResponse = await resend.emails.send({
       from: fromEmail,
       to: ADMIN_EMAIL,
-      subject: `🏸 New Booking Confirmed: #${bookingReference} - ${customerName}`,
+      subject: `🏸 GCash Payment Verified: #${bookingReference} - ${customerName}`,
       html: htmlContent,
       text: textContent,
     });
 
-    if (emailResponse.error) {
-      console.error('[MATCH&SIP] Resend API error sending admin notification:', emailResponse.error);
+    console.log('[MATCH&SIP] Admin notification email sent successfully:', emailResponse);
+    return { success: true, data: emailResponse };
+  } catch (err) {
+    console.error('[MATCH&SIP] Error in sendAdminNotification:', err);
+    return { success: false, error: err };
+  }
+}
+
+// API Health Check & Configuration Status
+app.get('/api/health', (req, res) => {
+  const currentKey = process.env.RESEND_API_KEY?.trim();
+  const currentFrom = process.env.RESEND_FROM_EMAIL?.trim() || 'MATCH and SIP <onboarding@resend.dev>';
+  const paymongoKey = process.env.PAYMONGO_SECRET_KEY?.trim();
+  const webhookKey = process.env.PAYMONGO_WEBHOOK_SECRET_KEY?.trim();
+
+  res.json({
+    status: 'ok',
+    resendConfigured: !!currentKey,
+    activeSender: currentFrom,
+    maskedApiKey: getMaskedKey(currentKey),
+    paymongoConfigured: !!paymongoKey,
+    maskedPaymongoKey: getMaskedKey(paymongoKey),
+    webhookConfigured: !!webhookKey,
+    adminEmail: ADMIN_EMAIL,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Admin Booking Notification Endpoint
+app.post('/api/notify-admin', async (req, res) => {
+  try {
+    const { booking } = req.body;
+    if (!booking || !booking.bookingReference) {
+      return res.status(400).json({ success: false, error: 'Invalid booking data provided.' });
+    }
+
+    const result = await sendAdminNotification(booking);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * 1. CHECKOUT CREATION API (/api/create-checkout)
+ * Integrates PayMongo Checkout Session or Source when user clicks BOOK RESERVATION.
+ * Generates GCash checkout URL & dynamic QR code, and holds the booking in Firestore.
+ */
+app.post('/api/create-checkout', async (req, res) => {
+  try {
+    const { booking } = req.body;
+    if (!booking || !booking.bookingReference || !booking.totalAmount) {
       return res.status(400).json({
         success: false,
-        error: emailResponse.error.message,
-        details: emailResponse.error,
+        error: 'Missing required booking parameters (bookingReference, totalAmount).',
       });
     }
 
-    console.log('[MATCH&SIP] Admin notification email sent successfully:', emailResponse);
+    const {
+      bookingReference,
+      selectedDate,
+      customer,
+      slots = [],
+      totalAmount,
+    } = booking;
+
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const host = req.headers['x-forwarded-host'] || req.get('host') || 'localhost:3000';
+    const baseUrl =
+      process.env.APP_URL?.replace(/\/$/, '') ||
+      `${protocol}://${host}`;
+
+    // Secure the reservation doc in Cloud Firestore with initial status 'PENDING'
+    try {
+      const bookingDocRef = doc(db, 'bookings', bookingReference);
+      await setDoc(
+        bookingDocRef,
+        {
+          bookingReference,
+          selectedDate,
+          paymentMethod: 'GCash (PayMongo)',
+          customer: {
+            fullName: customer?.fullName || 'Customer',
+            phoneNumber: customer?.phoneNumber || '',
+            email: customer?.email || '',
+          },
+          slots: slots.map((s: any) => ({
+            slotId: s.slotId,
+            courtId: s.courtId,
+            courtName: s.courtName,
+            timeLabel: s.timeLabel,
+            date: s.date || selectedDate,
+            price: s.price,
+          })),
+          totalAmount: Number(totalAmount),
+          status: 'PENDING',
+          createdAt: booking.createdAt || new Date().toISOString(),
+          serverTimestamp: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (dbErr) {
+      console.warn('[MATCH&SIP] Initial booking doc setup notice:', dbErr);
+    }
+
+    const paymongoSecretKey = process.env.PAYMONGO_SECRET_KEY?.trim();
+
+    // IF PayMongo Secret Key is configured, make real API call to PayMongo
+    if (paymongoSecretKey) {
+      try {
+        console.log(`[MATCH&SIP] Creating PayMongo Checkout Session for #${bookingReference} (₱${totalAmount})`);
+        
+        // Build line items for PayMongo
+        const lineItems = slots.length > 0
+          ? slots.map((s: any) => ({
+              name: `${s.courtName} (${s.timeLabel})`,
+              amount: Math.round(Number(s.price) * 100), // amount in centavos
+              currency: 'PHP',
+              quantity: 1,
+            }))
+          : [
+              {
+                name: `MATCH&SIP Court Booking #${bookingReference}`,
+                amount: Math.round(Number(totalAmount) * 100),
+                currency: 'PHP',
+                quantity: 1,
+              },
+            ];
+
+        const paymongoPayload = {
+          data: {
+            attributes: {
+              send_email_receipt: false,
+              show_description: true,
+              show_line_items: true,
+              payment_method_types: ['gcash'],
+              description: `MATCH&SIP Court Booking #${bookingReference} - ${selectedDate}`,
+              line_items: lineItems,
+              reference_number: bookingReference,
+              success_url: `${baseUrl}/payment/success?reference=${bookingReference}&gateway=paymongo`,
+              cancel_url: `${baseUrl}/?cancelled=true&reference=${bookingReference}`,
+              metadata: {
+                bookingReference,
+                selectedDate,
+                customerName: customer?.fullName,
+                customerPhone: customer?.phoneNumber,
+              },
+            },
+          },
+        };
+
+        const response = await fetch('https://api.paymongo.com/v1/checkout_sessions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Basic ${Buffer.from(paymongoSecretKey + ':').toString('base64')}`,
+          },
+          body: JSON.stringify(paymongoPayload),
+        });
+
+        const paymongoData = await response.json();
+
+        if (response.ok && paymongoData?.data?.attributes?.checkout_url) {
+          const checkoutUrl = paymongoData.data.attributes.checkout_url;
+          // Generate crisp dynamic QR code data URL
+          const qrCodeUrl = await QRCode.toDataURL(checkoutUrl, {
+            margin: 2,
+            width: 320,
+            color: { dark: '#000000', light: '#ffffff' },
+          });
+
+          return res.json({
+            success: true,
+            checkoutUrl,
+            qrCodeUrl,
+            bookingReference,
+            provider: 'paymongo',
+            isLive: true,
+            sessionId: paymongoData.data.id,
+          });
+        } else {
+          console.warn('[MATCH&SIP] PayMongo API returned error, falling back to simulated sandbox:', paymongoData);
+        }
+      } catch (paymongoErr) {
+        console.error('[MATCH&SIP] PayMongo request exception:', paymongoErr);
+      }
+    }
+
+    // High-fidelity fallback / Sandbox mode:
+    // Generates a dedicated GCash authorization gateway checkout URL and dynamic QR code
+    const checkoutPageUrl = `/checkout/gcash-pay?reference=${bookingReference}`;
+    const fullCheckoutUrl = `${baseUrl}${checkoutPageUrl}`;
+    const qrCodeUrl = await QRCode.toDataURL(fullCheckoutUrl, {
+      margin: 2,
+      width: 320,
+      color: { dark: '#000000', light: '#ffffff' },
+    });
 
     return res.json({
       success: true,
-      data: emailResponse,
-      recipient: ADMIN_EMAIL,
+      checkoutUrl: checkoutPageUrl,
+      fullCheckoutUrl,
+      qrCodeUrl,
+      bookingReference,
+      provider: 'paymongo-sandbox',
+      isLive: false,
+      message: 'Checkout session created. Use QR code or button to complete GCash authorization.',
     });
   } catch (err: any) {
-    console.error('[MATCH&SIP] Error sending admin notification email:', err);
+    console.error('[MATCH&SIP] Error in /api/create-checkout:', err);
     return res.status(500).json({
       success: false,
-      error: err.message || 'Failed to send notification email',
+      error: err.message || 'Failed to create payment checkout session.',
     });
+  }
+});
+
+/**
+ * Helper to verify PayMongo Webhook Signature (HMAC-SHA256)
+ */
+function verifyWebhookSignature(
+  rawBody: string,
+  signatureHeader: string,
+  secretKey: string
+): boolean {
+  if (!signatureHeader || !secretKey) return false;
+  try {
+    const parts = signatureHeader.split(',');
+    let timestamp = '';
+    let testSig = '';
+    let liveSig = '';
+
+    for (const part of parts) {
+      const [key, val] = part.trim().split('=');
+      if (key === 't') timestamp = val;
+      if (key === 'te') testSig = val;
+      if (key === 'li') liveSig = val;
+    }
+
+    if (!timestamp) return false;
+
+    const signaturePayload = `${timestamp}.${rawBody}`;
+    const expectedSig = crypto
+      .createHmac('sha256', secretKey)
+      .update(signaturePayload)
+      .digest('hex');
+
+    if (testSig && crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(testSig))) {
+      return true;
+    }
+    if (liveSig && crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(liveSig))) {
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error('[MATCH&SIP] Webhook signature verification error:', err);
+    return false;
+  }
+}
+
+/**
+ * 2. BACKEND WEBHOOK INTEGRATION (/api/webhooks/payment)
+ * Receives real-time POST events from PayMongo (e.g. checkout_session.payment.paid, source.chargeable).
+ * Verifies signature, updates booking in Firestore to 'BOOKED', and alerts admin.
+ */
+app.post('/api/webhooks/payment', async (req: any, res) => {
+  try {
+    const signatureHeader =
+      (req.headers['paymongo-signature'] as string) ||
+      (req.headers['Paymongo-Signature'] as string) ||
+      '';
+    const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET_KEY?.trim();
+
+    // Verify event signature when webhook secret is provided
+    if (webhookSecret) {
+      const rawBody = req.rawBody || JSON.stringify(req.body);
+      const isValid = verifyWebhookSignature(rawBody, signatureHeader, webhookSecret);
+      if (!isValid) {
+        console.warn('[MATCH&SIP] Webhook signature verification failed.');
+        return res.status(401).json({ error: 'Invalid webhook signature.' });
+      }
+      console.log('[MATCH&SIP] PayMongo webhook signature successfully verified.');
+    } else {
+      console.log('[MATCH&SIP] PAYMONGO_WEBHOOK_SECRET_KEY not set. Processing webhook payload.');
+    }
+
+    const payload = req.body;
+    const eventType = payload?.data?.attributes?.type || payload?.type || 'payment.paid';
+    console.log(`[MATCH&SIP] Processing payment webhook event: ${eventType}`);
+
+    // Extract booking reference from diverse PayMongo payload shapes
+    const eventData = payload?.data?.attributes?.data || payload?.data || {};
+    const metadata =
+      eventData?.attributes?.metadata ||
+      payload?.data?.attributes?.metadata ||
+      payload?.metadata ||
+      {};
+
+    let bookingReference =
+      metadata?.bookingReference ||
+      eventData?.attributes?.reference_number ||
+      payload?.bookingReference ||
+      '';
+
+    // If still not found, check description for MS-XXXXXX
+    if (!bookingReference) {
+      const description =
+        eventData?.attributes?.description || payload?.data?.attributes?.description || '';
+      const match = description.match(/MS-\d{6}/);
+      if (match) {
+        bookingReference = match[0];
+      }
+    }
+
+    if (!bookingReference) {
+      console.warn('[MATCH&SIP] Webhook received but no booking reference found in payload.');
+      return res.status(200).json({ received: true, note: 'No bookingReference identified' });
+    }
+
+    console.log(`[MATCH&SIP] Payment confirmed for booking reference: #${bookingReference}`);
+
+    // Automatically update reservation status in Cloud Firestore to 'BOOKED'
+    const bookingDocRef = doc(db, 'bookings', bookingReference);
+    const docSnap = await getDoc(bookingDocRef);
+
+    const updatePayload: Record<string, any> = {
+      status: 'BOOKED',
+      paymentMethod: 'GCash (PayMongo)',
+      paidAt: new Date().toISOString(),
+      webhookEventId: payload?.data?.id || 'paymongo_event',
+      serverTimestamp: serverTimestamp(),
+    };
+
+    if (docSnap.exists()) {
+      await updateDoc(bookingDocRef, updatePayload);
+      const existingData = docSnap.data();
+      // Send real-time admin notification email
+      await sendAdminNotification({
+        ...existingData,
+        ...updatePayload,
+      });
+    } else {
+      await setDoc(bookingDocRef, updatePayload, { merge: true });
+    }
+
+    console.log(`[MATCH&SIP] Booking #${bookingReference} successfully updated to BOOKED in Cloud Firestore.`);
+
+    return res.status(200).json({
+      received: true,
+      status: 'BOOKED',
+      bookingReference,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error('[MATCH&SIP] Error in /api/webhooks/payment:', err);
+    return res.status(500).json({ error: err.message || 'Webhook processing failed.' });
+  }
+});
+
+/**
+ * 3. SIMULATE GCASH PAYMENT (For testing & sandbox instant approval)
+ */
+app.post('/api/payment/simulate-pay', async (req, res) => {
+  try {
+    const { bookingReference } = req.body;
+    if (!bookingReference) {
+      return res.status(400).json({ success: false, error: 'bookingReference is required.' });
+    }
+
+    console.log(`[MATCH&SIP] Simulating GCash payment approval for #${bookingReference}`);
+    const bookingDocRef = doc(db, 'bookings', bookingReference);
+    const docSnap = await getDoc(bookingDocRef);
+
+    const updateData = {
+      status: 'BOOKED',
+      paymentMethod: 'GCash (PayMongo)',
+      paidAt: new Date().toISOString(),
+      webhookEventId: `sim_${Date.now()}`,
+      serverTimestamp: serverTimestamp(),
+    };
+
+    if (docSnap.exists()) {
+      await updateDoc(bookingDocRef, updateData);
+      await sendAdminNotification({
+        ...docSnap.data(),
+        ...updateData,
+      });
+    } else {
+      await setDoc(bookingDocRef, updateData, { merge: true });
+    }
+
+    return res.json({
+      success: true,
+      status: 'BOOKED',
+      bookingReference,
+      message: `Reservation #${bookingReference} status updated to BOOKED.`,
+    });
+  } catch (err: any) {
+    console.error('[MATCH&SIP] Error simulating payment:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * 4. GET BOOKING PAYMENT STATUS (/api/payment/status/:reference)
+ */
+app.get('/api/payment/status/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    if (!reference) {
+      return res.status(400).json({ success: false, error: 'Reference parameter required' });
+    }
+
+    const bookingDocRef = doc(db, 'bookings', reference);
+    const docSnap = await getDoc(bookingDocRef);
+
+    if (!docSnap.exists()) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+
+    const data = docSnap.data();
+    return res.json({
+      success: true,
+      bookingReference: reference,
+      status: data.status || 'PENDING',
+      isBooked: data.status === 'BOOKED',
+      totalAmount: data.totalAmount,
+      customer: data.customer,
+      selectedDate: data.selectedDate,
+      slots: data.slots,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

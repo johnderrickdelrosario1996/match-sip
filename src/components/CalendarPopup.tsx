@@ -13,6 +13,10 @@ interface CalendarPopupProps {
   selectedDate: string;
   onSelectDate: (dateStr: string) => void;
   currentTodayStr: string;
+  allowPastDates?: boolean;
+  bookingDates?: string[];
+  title?: string;
+  subtitle?: string;
 }
 
 const MONTH_NAMES = [
@@ -30,7 +34,7 @@ const MONTH_NAMES = [
   'December',
 ];
 
-const WEEKDAY_NAMES = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export const CalendarPopup: React.FC<CalendarPopupProps> = ({
   isOpen,
@@ -38,23 +42,27 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
   selectedDate,
   onSelectDate,
   currentTodayStr,
+  allowPastDates = false,
+  bookingDates = [],
+  title,
+  subtitle,
 }) => {
   const modalRef = useRef<HTMLDivElement>(null);
 
   // Parse view month and year from selectedDate or fallback to currentTodayStr
   const [viewYear, setViewYear] = useState<number>(() => {
-    const parts = (selectedDate || currentTodayStr).split('-').map(Number);
+    const parts = (selectedDate && selectedDate !== 'all' ? selectedDate : currentTodayStr).split('-').map(Number);
     return parts[0] || new Date().getFullYear();
   });
 
   const [viewMonth, setViewMonth] = useState<number>(() => {
-    const parts = (selectedDate || currentTodayStr).split('-').map(Number);
+    const parts = (selectedDate && selectedDate !== 'all' ? selectedDate : currentTodayStr).split('-').map(Number);
     return (parts[1] || 1) - 1; // 0-indexed
   });
 
   // Keep view in sync when opening with a new selectedDate
   useEffect(() => {
-    if (isOpen && selectedDate) {
+    if (isOpen && selectedDate && selectedDate !== 'all') {
       const parts = selectedDate.split('-').map(Number);
       if (parts[0] && parts[1]) {
         setViewYear(parts[0]);
@@ -94,12 +102,13 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
     return { year: y, month: m - 1, day: d };
   }, [currentTodayStr]);
 
-  // Check if we can navigate to previous month (cannot go earlier than current month of today)
+  // Check if we can navigate to previous month
   const canGoPrevMonth = useMemo(() => {
+    if (allowPastDates) return true;
     if (viewYear > todayParts.year) return true;
     if (viewYear === todayParts.year && viewMonth > todayParts.month) return true;
     return false;
-  }, [viewYear, viewMonth, todayParts]);
+  }, [viewYear, viewMonth, todayParts, allowPastDates]);
 
   const handlePrevMonth = () => {
     if (!canGoPrevMonth) return;
@@ -126,12 +135,10 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
     onSelectDate(currentTodayStr);
   };
 
-  // Build calendar matrix
+  // Build calendar matrix (Sunday = 0, Monday = 1 ... Saturday = 6)
   const calendarDays = useMemo(() => {
     const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
-    const firstDayIndex = new Date(viewYear, viewMonth, 1).getDay(); // 0 = Sun, 1 = Mon ...
-    // Convert to Monday = 0, Sunday = 6
-    const startOffset = firstDayIndex === 0 ? 6 : firstDayIndex - 1;
+    const startOffset = new Date(viewYear, viewMonth, 1).getDay(); // 0 = Sun, 1 = Mon ... 6 = Sat
 
     const cells = [];
 
@@ -144,6 +151,7 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
         isPast: true,
         isToday: false,
         isSelected: false,
+        hasBooking: false,
       });
     }
 
@@ -156,6 +164,7 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
       const isPast = dateStr < currentTodayStr;
       const isToday = dateStr === currentTodayStr;
       const isSelected = dateStr === selectedDate;
+      const hasBooking = bookingDates.includes(dateStr);
 
       cells.push({
         dayNum: day,
@@ -164,14 +173,16 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
         isPast,
         isToday,
         isSelected,
+        hasBooking,
       });
     }
 
     return cells;
-  }, [viewYear, viewMonth, currentTodayStr, selectedDate]);
+  }, [viewYear, viewMonth, currentTodayStr, selectedDate, bookingDates]);
 
   if (!isOpen) return null;
 
+  const yesterdayStr = addDaysToDateStr(currentTodayStr, -1);
   const tomorrowStr = addDaysToDateStr(currentTodayStr, 1);
   const thisSatStr = getNextWeekendDay(currentTodayStr, 6);
   const thisSunStr = getNextWeekendDay(currentTodayStr, 0);
@@ -193,10 +204,10 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
             </div>
             <div>
               <h3 className="text-sm sm:text-base font-black uppercase tracking-tight text-[#5E2CB2]">
-                SELECT RESERVATION DATE
+                {title || 'SELECT RESERVATION DATE'}
               </h3>
               <p className="text-[10px] sm:text-xs text-[#5E2CB2]/70">
-                Book courts up to 60 days in advance
+                {subtitle || (allowPastDates ? 'Select any past or present date to view bookings' : 'Book courts up to 60 days in advance')}
               </p>
             </div>
           </div>
@@ -229,6 +240,23 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
 
         {/* Quick Date Presets */}
         <div className="flex flex-wrap items-center gap-1.5">
+          {allowPastDates && (
+            <button
+              type="button"
+              onClick={() => {
+                onSelectDate('all');
+                onClose();
+              }}
+              className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+                selectedDate === 'all' || !selectedDate
+                  ? 'bg-[#5E2CB2] text-white shadow-sm'
+                  : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
+              }`}
+            >
+              All Bookings
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => {
@@ -245,56 +273,77 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
             Today
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              onSelectDate(tomorrowStr);
-              const p = tomorrowStr.split('-').map(Number);
-              setViewYear(p[0]);
-              setViewMonth(p[1] - 1);
-            }}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
-              selectedDate === tomorrowStr
-                ? 'bg-[#5E2CB2] text-white shadow-sm'
-                : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
-            }`}
-          >
-            Tomorrow
-          </button>
+          {allowPastDates ? (
+            <button
+              type="button"
+              onClick={() => {
+                onSelectDate(yesterdayStr);
+                const p = yesterdayStr.split('-').map(Number);
+                setViewYear(p[0]);
+                setViewMonth(p[1] - 1);
+              }}
+              className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+                selectedDate === yesterdayStr
+                  ? 'bg-[#5E2CB2] text-white shadow-sm'
+                  : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
+              }`}
+            >
+              Yesterday
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectDate(tomorrowStr);
+                  const p = tomorrowStr.split('-').map(Number);
+                  setViewYear(p[0]);
+                  setViewMonth(p[1] - 1);
+                }}
+                className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+                  selectedDate === tomorrowStr
+                    ? 'bg-[#5E2CB2] text-white shadow-sm'
+                    : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
+                }`}
+              >
+                Tomorrow
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              onSelectDate(thisSatStr);
-              const p = thisSatStr.split('-').map(Number);
-              setViewYear(p[0]);
-              setViewMonth(p[1] - 1);
-            }}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
-              selectedDate === thisSatStr
-                ? 'bg-[#5E2CB2] text-white shadow-sm'
-                : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
-            }`}
-          >
-            This Sat
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectDate(thisSatStr);
+                  const p = thisSatStr.split('-').map(Number);
+                  setViewYear(p[0]);
+                  setViewMonth(p[1] - 1);
+                }}
+                className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+                  selectedDate === thisSatStr
+                    ? 'bg-[#5E2CB2] text-white shadow-sm'
+                    : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
+                }`}
+              >
+                This Sat
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              onSelectDate(thisSunStr);
-              const p = thisSunStr.split('-').map(Number);
-              setViewYear(p[0]);
-              setViewMonth(p[1] - 1);
-            }}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
-              selectedDate === thisSunStr
-                ? 'bg-[#5E2CB2] text-white shadow-sm'
-                : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
-            }`}
-          >
-            This Sun
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectDate(thisSunStr);
+                  const p = thisSunStr.split('-').map(Number);
+                  setViewYear(p[0]);
+                  setViewMonth(p[1] - 1);
+                }}
+                className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+                  selectedDate === thisSunStr
+                    ? 'bg-[#5E2CB2] text-white shadow-sm'
+                    : 'bg-gray-100 text-[#5E2CB2] hover:bg-[#00C6FF]/20'
+                }`}
+              >
+                This Sun
+              </button>
+            </>
+          )}
         </div>
 
         {/* Month Navigation Row */}
@@ -350,26 +399,38 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
                 return <div key={`empty-${idx}`} className="h-9 w-full" />;
               }
 
+              const isPastDisabled = !allowPastDates && cell.isPast;
+
               return (
                 <button
                   key={cell.dateStr}
                   type="button"
-                  disabled={cell.isPast}
+                  disabled={isPastDisabled}
                   onClick={() => {
                     onSelectDate(cell.dateStr);
+                    if (allowPastDates) {
+                      onClose();
+                    }
                   }}
                   className={`relative flex h-9 w-full flex-col items-center justify-center rounded-xl text-xs font-bold transition-all ${
                     cell.isSelected
                       ? 'bg-[#5E2CB2] text-white shadow-md shadow-[#5E2CB2]/30 scale-105 z-10'
-                      : cell.isPast
+                      : isPastDisabled
                       ? 'text-gray-300 cursor-not-allowed bg-transparent'
+                      : cell.hasBooking
+                      ? 'text-[#5E2CB2] font-black bg-[#00C6FF]/15 border border-[#00C6FF]/50 hover:bg-[#00C6FF]/30 cursor-pointer'
                       : 'text-[#5E2CB2] hover:bg-[#00C6FF]/25 hover:border-[#00C6FF] border border-transparent cursor-pointer'
                   }`}
                   aria-label={`${cell.dateStr}${cell.isToday ? ' (Today)' : ''}${
-                    cell.isPast ? ' (Past date, unavailable)' : ''
-                  }`}
+                    cell.hasBooking ? ' (Has court bookings)' : ''
+                  }${isPastDisabled ? ' (Past date, unavailable)' : ''}`}
                 >
                   <span>{cell.dayNum}</span>
+
+                  {/* Has booking indicator */}
+                  {cell.hasBooking && !cell.isSelected && (
+                    <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-[#00C6FF]" title="Has court bookings" />
+                  )}
 
                   {/* Today marker */}
                   {cell.isToday && (
@@ -392,7 +453,7 @@ export const CalendarPopup: React.FC<CalendarPopupProps> = ({
               Selected Date
             </span>
             <span className="text-xs sm:text-sm font-black text-[#5E2CB2]">
-              {formatDateToFullReadable(selectedDate)}
+              {selectedDate === 'all' || !selectedDate ? 'All Bookings' : formatDateToFullReadable(selectedDate)}
             </span>
           </div>
 

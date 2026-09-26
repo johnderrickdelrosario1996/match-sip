@@ -170,7 +170,7 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
               <span>LIVE COURT MATRIX</span>
             </div>
 
-            <h2 className="font-heading text-4xl sm:text-5xl lg:text-6xl font-black uppercase tracking-tight text-[#5E2CB2] leading-[0.95]">
+            <h2 className="font-heading text-4xl sm:text-5xl md:text-6xl lg:text-[68px] font-black uppercase tracking-tight text-[#5E2CB2] leading-[0.95]">
               PICK YOUR<br />
               TIME &amp; SPACE
             </h2>

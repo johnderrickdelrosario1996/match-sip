@@ -26,19 +26,18 @@ export const HeroSection: React.FC<HeroSectionProps> = ({ onQuickBookSubmit }) =
               ============================================================ */}
           <div className="flex flex-col items-start gap-4 sm:gap-6 lg:col-span-5">
             {/* Sub-heading / Eyebrow */}
-            <div className="flex items-center gap-2 text-xs sm:text-sm font-black tracking-widest uppercase text-[#00C6FF]">
-              <span className="h-2 w-2 rounded-full bg-[#00C6FF] shadow-sm shadow-[#00C6FF]/60" />
-              <span>THE COURT AWAITS</span>
+            <div className="font-black tracking-widest uppercase text-[#00C6FF]">
+              <span className="text-[18px]">THE COURT AWAITS</span>
             </div>
 
             {/* Large Bold Stacked Headline */}
-            <h1 className="font-heading text-5xl font-black uppercase tracking-tight text-[#FFFFFF] sm:text-6xl md:text-7xl lg:text-8xl leading-[0.95]">
+            <h1 className="font-heading text-6xl sm:text-7xl md:text-8xl lg:text-[108px] font-black uppercase tracking-tight text-[#FFFFFF] leading-[0.95]">
               PLAY<br />
               <span className="text-[#00C6FF]">TODAY.</span>
             </h1>
 
             {/* Description Paragraph */}
-            <p className="max-w-xl text-sm sm:text-base lg:text-lg font-normal leading-relaxed text-[#B3A2DB]">
+            <p className="max-w-xl text-[16px] font-[Arial,sans-serif] font-normal leading-relaxed text-[#B3A2DB]">
               Reserve your court in 30 seconds. Chill experience, night-game lighting, open play sessions all day, every day, and coffee breaks!
             </p>
           </div>
