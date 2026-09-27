@@ -94,6 +94,15 @@ export async function deleteBookingFromFirestore(bookingId: string): Promise<voi
 }
 
 /**
+ * Helper to build canonical slot ID (e.g. "court-1-0800")
+ */
+function toCanonicalSlotId(courtId: string, timeLabel: string): string {
+  const match = (timeLabel || '').match(/(\d{1,2}):(\d{2})/);
+  const timeDigits = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
+  return `${courtId || 'court-1'}-${timeDigits}`;
+}
+
+/**
  * Update an existing booking in Cloud Firestore.
  */
 export async function updateBookingInFirestore(
@@ -108,19 +117,66 @@ export async function updateBookingInFirestore(
     slots?: SelectedSlot[];
   }
 ): Promise<void> {
-  if (!bookingId) throw new Error('Missing booking ID for update');
-  const bookingRef = doc(db, BOOKINGS_COLLECTION, bookingId);
+  const cleanId = (bookingId || '').trim();
+  if (!cleanId) throw new Error('Missing booking ID for update');
+  const bookingRef = doc(db, BOOKINGS_COLLECTION, cleanId);
 
-  const payload: Record<string, any> = {};
-  if (updates.selectedDate !== undefined) payload.selectedDate = updates.selectedDate;
+  // Clean slot objects to ensure NO undefined values reach Firestore and canonical slot IDs are set
+  const cleanSlots = updates.slots
+    ? updates.slots.map((s) => {
+        const courtId = s.courtId || 'court-1';
+        const courtName = s.courtName || (courtId === 'court-2' ? 'Court 02' : 'Court 01');
+        const timeLabel = s.timeLabel || '08:00 - 09:00';
+        const canonicalSlotId = toCanonicalSlotId(courtId, timeLabel);
+
+        return {
+          slotId: canonicalSlotId,
+          courtId,
+          courtName,
+          timeLabel,
+          date: s.date || updates.selectedDate || '',
+          price: Number(s.price) || 0,
+        };
+      })
+    : undefined;
+
+  const payload: Record<string, any> = {
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (updates.selectedDate !== undefined) payload.selectedDate = updates.selectedDate.trim();
   if (updates.status !== undefined) payload.status = updates.status;
-  if (updates.totalAmount !== undefined) payload.totalAmount = updates.totalAmount;
-  if (updates.fullName !== undefined) payload['customer.fullName'] = updates.fullName;
-  if (updates.phoneNumber !== undefined) payload['customer.phoneNumber'] = updates.phoneNumber;
-  if (updates.notes !== undefined) payload['customer.notes'] = updates.notes;
-  if (updates.slots !== undefined) payload.slots = updates.slots;
+  if (updates.totalAmount !== undefined) payload.totalAmount = Number(updates.totalAmount) || 0;
+  if (cleanSlots !== undefined) payload.slots = cleanSlots;
 
-  await updateDoc(bookingRef, payload);
+  if (updates.fullName !== undefined) payload['customer.fullName'] = updates.fullName.trim();
+  if (updates.phoneNumber !== undefined) payload['customer.phoneNumber'] = updates.phoneNumber.trim();
+  if (updates.notes !== undefined) payload['customer.notes'] = (updates.notes || '').trim();
+
+  try {
+    await updateDoc(bookingRef, payload);
+  } catch (err: any) {
+    console.warn(`[MATCH&SIP] updateDoc failed on ${cleanId}, falling back to setDoc({ merge: true }):`, err);
+
+    // Fallback: build nested object representation for setDoc merge
+    const mergePayload: Record<string, any> = {
+      updatedAt: payload.updatedAt,
+    };
+    if (payload.selectedDate !== undefined) mergePayload.selectedDate = payload.selectedDate;
+    if (payload.status !== undefined) mergePayload.status = payload.status;
+    if (payload.totalAmount !== undefined) mergePayload.totalAmount = payload.totalAmount;
+    if (payload.slots !== undefined) mergePayload.slots = payload.slots;
+
+    const customerObj: Record<string, any> = {};
+    if (updates.fullName !== undefined) customerObj.fullName = updates.fullName.trim();
+    if (updates.phoneNumber !== undefined) customerObj.phoneNumber = updates.phoneNumber.trim();
+    if (updates.notes !== undefined) customerObj.notes = (updates.notes || '').trim();
+    if (Object.keys(customerObj).length > 0) {
+      mergePayload.customer = customerObj;
+    }
+
+    await setDoc(bookingRef, mergePayload, { merge: true });
+  }
 }
 
 /**

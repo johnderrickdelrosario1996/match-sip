@@ -1,54 +1,7 @@
-import React, { useState } from 'react';
-import { MapPin, Clock, Phone, Mail, Navigation, ExternalLink, X } from 'lucide-react';
-
-// Custom Vibrant Cyan Pickleball Paddle Icon
-const PickleballPaddleIcon: React.FC<{ className?: string }> = ({ className = 'w-7 h-7' }) => (
-  <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
-    {/* Paddle Face with rounded ergonomic profile */}
-    <rect
-      x="8"
-      y="5"
-      width="25"
-      height="27"
-      rx="9"
-      className="fill-[#00C6FF] stroke-[#FFFFFF]"
-      strokeWidth="2.5"
-    />
-    {/* Perforations / airflow surface dots */}
-    <circle cx="16" cy="13" r="1.5" className="fill-[#1A0B2E]" />
-    <circle cx="25" cy="13" r="1.5" className="fill-[#1A0B2E]" />
-    <circle cx="20.5" cy="18.5" r="1.5" className="fill-[#1A0B2E]" />
-    <circle cx="16" cy="24" r="1.5" className="fill-[#1A0B2E]" />
-    <circle cx="25" cy="24" r="1.5" className="fill-[#1A0B2E]" />
-    {/* Throat joint */}
-    <path
-      d="M17 32L18.5 35H22.5L24 32"
-      className="fill-[#00C6FF] stroke-[#FFFFFF]"
-      strokeWidth="2"
-    />
-    {/* Paddle Handle with Grip wraps */}
-    <rect
-      x="18.5"
-      y="34"
-      width="4"
-      height="10"
-      rx="2"
-      className="fill-[#1A0B2E] stroke-[#00C6FF]"
-      strokeWidth="1.5"
-    />
-    <line x1="19" y1="37" x2="22" y2="37" stroke="#00C6FF" strokeWidth="1" strokeLinecap="round" />
-    <line x1="19" y1="40" x2="22" y2="40" stroke="#00C6FF" strokeWidth="1" strokeLinecap="round" />
-    {/* Vibrant Cyan Pickleball (wiffle ball) */}
-    <circle cx="35" cy="27" r="6" className="fill-[#00C6FF] stroke-[#FFFFFF]" strokeWidth="2" />
-    <circle cx="33" cy="25" r="0.9" className="fill-[#1A0B2E]" />
-    <circle cx="37" cy="25" r="0.9" className="fill-[#1A0B2E]" />
-    <circle cx="35" cy="29" r="0.9" className="fill-[#1A0B2E]" />
-  </svg>
-);
+import React from 'react';
+import { MapPin, Clock, Phone, Mail, Navigation, ExternalLink } from 'lucide-react';
 
 export const FindUsSection: React.FC = () => {
-  const [showPinPopup, setShowPinPopup] = useState<boolean>(true);
-
   // Exact GPS Coordinates: 6°09'54.0"N 125°09'31.6"E (6.165000, 125.158778)
   const coordinatesDms = `6°09'54.0"N 125°09'31.6"E`;
   const latitude = 6.165;
@@ -228,17 +181,6 @@ export const FindUsSection: React.FC = () => {
                 <span className="text-[11px] text-[#FFFFFF]/90 font-mono hidden sm:inline">{coordinatesDms}</span>
               </div>
 
-              {/* Direct Open in Full Map Button on Map Card */}
-              <a
-                href={googleMapsUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="absolute top-4 right-4 z-10 hidden sm:flex items-center gap-1.5 rounded-full border border-[#00C6FF]/40 bg-[#1A0B2E]/90 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider text-[#00C6FF] hover:bg-[#00C6FF] hover:text-black transition-all shadow-lg backdrop-blur-md"
-              >
-                <span>Open in Google Maps</span>
-                <ExternalLink className="h-3 w-3" />
-              </a>
-
               {/* Interactive Google Map iframe */}
               <iframe
                 title="Match&Sip Pin Location Map - 6°09'54.0&quot;N 125°09'31.6&quot;E"
@@ -250,112 +192,6 @@ export const FindUsSection: React.FC = () => {
                 loading="lazy"
                 referrerPolicy="no-referrer-when-downgrade"
               />
-
-              {/* Custom Vibrant Cyan Pickleball Paddle Pin with Glowing Pulse Animation & Electric Cyan Border Ring */}
-              <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-20">
-                <div className="relative pointer-events-auto flex flex-col items-center">
-                  
-                  {/* Interactive Match&Sip Venue Popover (Visible on Click / Default Open) */}
-                  {showPinPopup && (
-                    <div className="absolute bottom-[calc(100%+14px)] left-1/2 -translate-x-1/2 w-64 sm:w-72 rounded-2xl border-2 border-[#00C6FF] bg-[#1A0B2E]/95 p-3.5 text-[#FFFFFF] shadow-2xl shadow-[#00C6FF]/35 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150 z-30">
-                      <div className="flex items-start justify-between gap-2 pb-2 border-b border-[#B3A2DB]/20">
-                        <div>
-                          <div className="flex items-center gap-1.5">
-                            <span className="h-2 w-2 rounded-full bg-[#00C6FF] shadow-sm shadow-[#00C6FF]" />
-                            <h4 className="font-heading text-sm font-black tracking-tight uppercase text-[#FFFFFF]">
-                              MATCH&amp;SIP
-                            </h4>
-                          </div>
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-[#00C6FF]">
-                            Pickleball Courts 01 &amp; 02
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowPinPopup(false);
-                          }}
-                          className="rounded-md p-1 text-[#B3A2DB] hover:text-[#FFFFFF] hover:bg-white/10 transition-colors cursor-pointer"
-                          aria-label="Close Match&Sip popup"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-
-                      <div className="mt-2 space-y-1 text-[11px] text-[#B3A2DB]">
-                        <p className="text-[#FFFFFF] font-semibold leading-tight">
-                          Purok 19, Promise Land, Brgy. Mabuhay, G.S.C.
-                        </p>
-                        <p className="text-[#00C6FF] font-mono text-[10px] font-bold">
-                          {coordinatesDms}
-                        </p>
-                        <p className="flex items-center gap-1 text-[10px] text-[#B3A2DB] pt-0.5">
-                          <Clock className="h-3 w-3 text-[#00C6FF]" />
-                          <span>Open Daily 08:00 – 24:00</span>
-                        </p>
-                      </div>
-
-                      <div className="mt-2.5 pt-2 border-t border-[#B3A2DB]/20 grid grid-cols-2 gap-1.5">
-                        <a
-                          href={googleMapsUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center justify-center gap-1 rounded-lg bg-[#00C6FF] px-2 py-1.5 text-[10px] font-black uppercase text-black hover:bg-[#00C6FF]/90 transition-colors"
-                        >
-                          <Navigation className="h-3 w-3 fill-black" />
-                          <span>Google Maps</span>
-                        </a>
-                        <a
-                          href={wazeUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center justify-center gap-1 rounded-lg border border-[#00C6FF]/50 bg-white/10 px-2 py-1.5 text-[10px] font-black uppercase text-[#FFFFFF] hover:text-[#00C6FF] hover:bg-[#00C6FF]/20 transition-colors"
-                        >
-                          <Navigation className="h-3 w-3 text-[#00C6FF]" />
-                          <span>Waze</span>
-                        </a>
-                      </div>
-
-                      {/* Speech Bubble Arrow pointing down to the paddle pin */}
-                      <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[7px] border-l-transparent border-r-[7px] border-r-transparent border-t-[8px] border-t-[#00C6FF]" />
-                    </div>
-                  )}
-
-                  {/* The Larger Cyan Pickleball Paddle Pin with Glowing Pulse Animation */}
-                  <button
-                    type="button"
-                    onClick={() => setShowPinPopup(!showPinPopup)}
-                    aria-label="Click to show Match&Sip location details"
-                    className="group relative cursor-pointer flex flex-col items-center focus:outline-none transition-transform hover:scale-110 active:scale-95"
-                  >
-                    {/* Glowing Pulse Animation - Radiating Electric Cyan Waves */}
-                    <span className="absolute -inset-4 sm:-inset-5 rounded-full border-2 border-[#00C6FF] animate-ping opacity-60 pointer-events-none" />
-                    <span className="absolute -inset-2.5 sm:-inset-3 rounded-full border-2 border-[#00C6FF]/80 animate-pulse pointer-events-none" />
-                    <span className="absolute inset-0 rounded-full bg-[#00C6FF]/35 blur-md animate-pulse pointer-events-none" />
-
-                    {/* Main Pin Badge with Electric Cyan Border Ring & Subtle Glow Effect */}
-                    <div className="relative h-14 w-14 sm:h-16 sm:w-16 rounded-full bg-[#1A0B2E] border-[3px] border-[#00C6FF] shadow-[0_0_24px_rgba(0,198,255,0.7)] ring-4 ring-[#00C6FF]/35 flex items-center justify-center p-2 transition-all group-hover:border-[#FFFFFF] group-hover:shadow-[0_0_30px_#00C6FF]">
-                      <div className="filter drop-shadow-[0_0_8px_rgba(0,198,255,0.9)] flex items-center justify-center">
-                        <PickleballPaddleIcon className="w-8 h-8 sm:w-9 sm:h-9" />
-                      </div>
-                    </div>
-
-                    {/* Pin Teardrop Stem / Ground Pointer */}
-                    <div className="-mt-1 flex flex-col items-center">
-                      <div className="w-0 h-0 border-l-[7px] border-l-transparent border-r-[7px] border-r-transparent border-t-[9px] border-t-[#00C6FF] filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.5)]" />
-                      <span className="h-1.5 w-1.5 rounded-full bg-[#00C6FF] shadow-sm shadow-[#00C6FF] -mt-0.5" />
-                    </div>
-
-                    {/* Click Indicator Badge when popup is dismissed */}
-                    {!showPinPopup && (
-                      <span className="absolute top-[calc(100%+8px)] whitespace-nowrap rounded-full bg-[#1A0B2E]/95 border border-[#00C6FF] px-2.5 py-0.5 text-[10px] font-bold text-[#00C6FF] shadow-lg animate-bounce">
-                        Click for Match&amp;Sip
-                      </span>
-                    )}
-                  </button>
-                </div>
-              </div>
             </div>
           </div>
         </div>

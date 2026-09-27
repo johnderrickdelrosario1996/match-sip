@@ -35,6 +35,12 @@ interface EditBookingModalProps {
   ) => Promise<void>;
 }
 
+export function buildCanonicalSlotId(courtId: CourtId, timeLabel: string): string {
+  const match = (timeLabel || '').match(/(\d{1,2}):(\d{2})/);
+  const timeDigits = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
+  return `${courtId || 'court-1'}-${timeDigits}`;
+}
+
 export const EditBookingModal: React.FC<EditBookingModalProps> = ({
   booking,
   isOpen,
@@ -59,16 +65,23 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
       setStatus(booking.status || 'CONFIRMED');
       setTotalAmount(Number(booking.totalAmount) || 0);
       setNotes(booking.customer?.notes || '');
-      // Deep copy existing slots or initialize empty array
+      // Deep copy existing slots and canonicalize slotId
       const initialSlots: SelectedSlot[] = Array.isArray(booking.slots)
-        ? booking.slots.map((s, idx) => ({
-            slotId: s.slotId || `slot-${idx}-${Date.now()}`,
-            courtId: s.courtId || 'court-1',
-            courtName: s.courtName || (s.courtId === 'court-2' ? 'Court 02' : 'Court 01'),
-            timeLabel: s.timeLabel || '08:00 - 09:00',
-            date: s.date || booking.selectedDate,
-            price: Number(s.price) || 150,
-          }))
+        ? booking.slots.map((s, idx) => {
+            const courtId: CourtId = s.courtId === 'court-2' ? 'court-2' : 'court-1';
+            const courtName = courtId === 'court-2' ? 'Court 02' : 'Court 01';
+            const timeLabel = s.timeLabel || '08:00 - 09:00';
+            const canonicalId = buildCanonicalSlotId(courtId, timeLabel);
+
+            return {
+              slotId: canonicalId,
+              courtId,
+              courtName,
+              timeLabel,
+              date: s.date || booking.selectedDate,
+              price: Number(s.price) || 150,
+            };
+          })
         : [];
       setSlots(initialSlots);
       setErrorMessage(null);
@@ -77,15 +90,17 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
 
   if (!isOpen || !booking) return null;
 
-  // Handle slot modifications
+  // Handle slot modifications with automatic canonical slotId sync
   const handleCourtChange = (index: number, courtId: CourtId) => {
     setSlots((prev) => {
       const updated = [...prev];
       const courtName = courtId === 'court-2' ? 'Court 02' : 'Court 01';
+      const timeLabel = updated[index]?.timeLabel || '08:00 - 09:00';
       updated[index] = {
         ...updated[index],
         courtId,
         courtName,
+        slotId: buildCanonicalSlotId(courtId, timeLabel),
       };
       return updated;
     });
@@ -94,9 +109,11 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
   const handleTimeLabelChange = (index: number, timeLabel: string) => {
     setSlots((prev) => {
       const updated = [...prev];
+      const courtId = updated[index]?.courtId || 'court-1';
       updated[index] = {
         ...updated[index],
         timeLabel,
+        slotId: buildCanonicalSlotId(courtId, timeLabel),
       };
       return updated;
     });
@@ -124,11 +141,13 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
   };
 
   const handleAddSlot = () => {
+    const courtId: CourtId = 'court-1';
+    const timeLabel = '08:00 - 09:00';
     const newSlot: SelectedSlot = {
-      slotId: `slot-${Date.now()}-${slots.length}`,
-      courtId: 'court-1',
+      slotId: buildCanonicalSlotId(courtId, timeLabel),
+      courtId,
       courtName: 'Court 01',
-      timeLabel: '08:00 - 09:00',
+      timeLabel,
       date: selectedDate || booking.selectedDate,
       price: BASE_PRICE_OFFPEAK,
     };
@@ -173,14 +192,29 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
     try {
       setIsSaving(true);
       setErrorMessage(null);
-      const targetId = booking.id || booking.bookingReference;
+      const targetId = booking.bookingReference || booking.id || '';
+      if (!targetId) {
+        setErrorMessage('Cannot find a valid reservation reference to update.');
+        return;
+      }
       
-      // Ensure each slot carries the current selected date
-      const normalizedSlots = slots.map((s) => ({
-        ...s,
-        date: selectedDate.trim(),
-        price: Number(s.price) || 0,
-      }));
+      // Ensure each slot carries canonical slotId, correct courtName, and selectedDate
+      const normalizedSlots: SelectedSlot[] = slots.map((s) => {
+        const courtId = s.courtId || 'court-1';
+        const courtName = courtId === 'court-2' ? 'Court 02' : 'Court 01';
+        const timeLabel = s.timeLabel.trim();
+        const slotId = buildCanonicalSlotId(courtId, timeLabel);
+
+        return {
+          ...s,
+          slotId,
+          courtId,
+          courtName,
+          timeLabel,
+          date: selectedDate.trim(),
+          price: Number(s.price) || 0,
+        };
+      });
 
       await onSave(targetId, {
         fullName: fullName.trim(),

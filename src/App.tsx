@@ -77,11 +77,20 @@ export default function App() {
     const bookedIdsOnSelectedDate = new Set(
       persistedBookings
         .filter((b) => b.selectedDate === selectedDate)
-        .flatMap((b) => b.slots.map((s) => s.slotId))
+        .flatMap((b) =>
+          (b.slots || []).flatMap((s) => {
+            const match = (s.timeLabel || '').match(/(\d{1,2}):(\d{2})/);
+            const timeKey = match ? `${match[1].padStart(2, '0')}${match[2]}` : '';
+            return [s.slotId, `${s.courtId}-${timeKey}`].filter(Boolean);
+          })
+        )
     );
 
     const conflicted = selectedSlots.filter(
-      (s) => s.date === selectedDate && bookedIdsOnSelectedDate.has(s.slotId)
+      (s) =>
+        s.date === selectedDate &&
+        (bookedIdsOnSelectedDate.has(s.slotId) ||
+          bookedIdsOnSelectedDate.has(`${s.courtId}-${s.timeLabel.slice(0, 2)}${s.timeLabel.slice(3, 5)}`))
     );
 
     if (conflicted.length > 0) {

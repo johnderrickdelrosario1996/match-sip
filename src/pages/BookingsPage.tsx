@@ -18,7 +18,6 @@ import {
   Check,
   Lock,
   Mail,
-  ArrowUpDown,
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
 import { 
@@ -371,8 +370,12 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
       slots?: ConfirmedBooking['slots'];
     }
   ) => {
-    await updateBookingInFirestore(bookingId, updates);
-    showNotification(`Reservation #${editingBooking?.bookingReference || bookingId} updated successfully.`);
+    const idToUpdate = bookingId || editingBooking?.bookingReference || editingBooking?.id || '';
+    if (!idToUpdate) {
+      throw new Error('Missing booking reference/ID for update.');
+    }
+    await updateBookingInFirestore(idToUpdate, updates);
+    showNotification(`Reservation #${editingBooking?.bookingReference || idToUpdate} updated successfully.`);
   };
 
   // ---------------------------------------------------------
@@ -597,30 +600,6 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
                 </button>
               )}
             </div>
-
-            {/* SORT SELECTOR */}
-            <div className="flex items-center gap-2">
-              <span className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[#B3A2DB] shrink-0">
-                <ArrowUpDown className="h-3.5 w-3.5 text-[#00C6FF]" />
-                Sort:
-              </span>
-              <select
-                value={sortOrder}
-                onChange={(e) => setSortOrder(e.target.value as any)}
-                className="rounded-full border border-[#B3A2DB]/40 bg-[#1A0B2E]/80 px-3.5 py-1.5 text-xs font-bold text-white shadow-sm transition-all focus:border-[#00C6FF] focus:outline-none cursor-pointer"
-              >
-                <option value="present-first" className="bg-[#1A0B2E] text-white">
-                  Present Schedule First (Today → Upcoming → Past)
-                </option>
-                <option value="newest-first" className="bg-[#1A0B2E] text-white">
-                  Newest Date First (Descending)
-                </option>
-                <option value="oldest-first" className="bg-[#1A0B2E] text-white">
-                  Oldest Date First (Ascending)
-                </option>
-              </select>
-            </div>
-
           </div>
 
           {/* SCHEDULE CATEGORY TABS & CALENDAR BUTTON */}

@@ -49,22 +49,69 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
     return formatDateToDDMMYYYY(selectedDate);
   }, [selectedDate]);
 
-  // Extract all booked slot IDs for the current selected date from Cloud Firestore
+  // Extract all booked slot IDs and time matches for the current selected date from Cloud Firestore
   const bookedSlotsMap = useMemo(() => {
     const map = new Map<string, { bookingRef: string; customerName: string; status: string }>();
+
     persistedBookings.forEach((b) => {
-      if (b.selectedDate === selectedDate) {
-        b.slots.forEach((s) => {
-          map.set(s.slotId, {
-            bookingRef: b.bookingReference,
-            customerName: b.customer?.fullName || 'Reserved',
-            status: b.status || 'VERIFIED',
-          });
-        });
-      }
+      // Check if booking or any of its slots match the currently viewed selectedDate
+      const bookingMatchesDate = b.selectedDate === selectedDate;
+
+      (b.slots || []).forEach((s) => {
+        const slotMatchesDate = s.date ? s.date === selectedDate : bookingMatchesDate;
+        if (!bookingMatchesDate && !slotMatchesDate) return;
+
+        const info = {
+          bookingRef: b.bookingReference,
+          customerName: b.customer?.fullName || 'Reserved',
+          status: b.status || 'VERIFIED',
+        };
+
+        // 1. Direct slotId key
+        if (s.slotId) {
+          map.set(s.slotId, info);
+        }
+
+        // 2. Canonical court-HHMM key (e.g. "court-1-0800")
+        const match = (s.timeLabel || '').match(/(\d{1,2}):(\d{2})/);
+        if (s.courtId && match) {
+          const hh = match[1].padStart(2, '0');
+          const mm = match[2];
+          map.set(`${s.courtId}-${hh}${mm}`, info);
+          map.set(`${s.courtId}-${hh}:${mm}`, info);
+        }
+
+        // 3. Court + full timeLabel key
+        if (s.courtId && s.timeLabel) {
+          map.set(`${s.courtId}-${s.timeLabel.trim()}`, info);
+        }
+      });
     });
+
     return map;
   }, [persistedBookings, selectedDate]);
+
+  // Helper to determine if a TimeSlot is booked
+  const isSlotBooked = (slot: TimeSlot): boolean => {
+    const timeDigits = slot.startTime.replace(':', '');
+    return (
+      bookedSlotsMap.has(slot.id) ||
+      bookedSlotsMap.has(`${slot.courtId}-${timeDigits}`) ||
+      bookedSlotsMap.has(`${slot.courtId}-${slot.startTime}`) ||
+      bookedSlotsMap.has(`${slot.courtId}-${slot.timeLabel}`)
+    );
+  };
+
+  // Helper to get booking DB info
+  const getSlotDbInfo = (slot: TimeSlot) => {
+    const timeDigits = slot.startTime.replace(':', '');
+    return (
+      bookedSlotsMap.get(slot.id) ||
+      bookedSlotsMap.get(`${slot.courtId}-${timeDigits}`) ||
+      bookedSlotsMap.get(`${slot.courtId}-${slot.startTime}`) ||
+      bookedSlotsMap.get(`${slot.courtId}-${slot.timeLabel}`)
+    );
+  };
 
   // Generate base slots and overlay Firestore persistence
   const court1Base = useMemo(() => generateSlotsForCourt('court-1', selectedDate), [selectedDate]);
@@ -72,7 +119,7 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
 
   const court1Slots = useMemo(() => {
     return court1Base.map((s) => {
-      if (bookedSlotsMap.has(s.id)) {
+      if (isSlotBooked(s)) {
         return { ...s, status: 'BOOKED' as const };
       }
       return s;
@@ -81,7 +128,7 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
 
   const court2Slots = useMemo(() => {
     return court2Base.map((s) => {
-      if (bookedSlotsMap.has(s.id)) {
+      if (isSlotBooked(s)) {
         return { ...s, status: 'BOOKED' as const };
       }
       return s;
@@ -105,8 +152,8 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
 
   const renderSlotButton = (slot: TimeSlot) => {
     const selected = isSlotSelected(slot.id);
-    const isBooked = slot.status === 'BOOKED';
-    const dbInfo = bookedSlotsMap.get(slot.id);
+    const isBooked = isSlotBooked(slot);
+    const dbInfo = getSlotDbInfo(slot);
 
     if (isBooked) {
       return (
