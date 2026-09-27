@@ -60,7 +60,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProof, setSelectedProof] = useState<string | null>(null);
   const [filterDate, setFilterDate] = useState<string>('all');
-  const [filterCategory, setFilterCategory] = useState<'all' | 'today' | 'upcoming' | 'past'>('all');
+  const [filterCategory, setFilterCategory] = useState<'all' | 'today' | 'upcoming' | 'past'>('today');
   const [sortOrder, setSortOrder] = useState<'present-first' | 'newest-first' | 'oldest-first'>('present-first');
   const [isCalendarOpen, setIsCalendarOpen] = useState<boolean>(false);
   const [deletingBookingId, setDeletingBookingId] = useState<string | null>(null);
@@ -606,6 +606,24 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
           <div className="flex flex-col gap-2.5 pt-1 border-t border-white/10">
             {/* Category Tabs and Calendar Button */}
             <div className="flex items-center gap-2 overflow-x-auto pb-1 flex-wrap sm:flex-nowrap">
+              {/* 1. TODAY'S SCHEDULE FIRST */}
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterCategory('today');
+                  setFilterDate('all');
+                }}
+                className={`cursor-pointer whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-black uppercase tracking-wider transition-colors flex items-center gap-1.5 ${
+                  filterCategory === 'today'
+                    ? 'bg-[#00C6FF] text-black shadow-md shadow-[#00C6FF]/30'
+                    : 'bg-white/10 text-white hover:bg-white/20'
+                }`}
+              >
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Today's Schedule ({todayBookingsCount})</span>
+              </button>
+
+              {/* 2. ALL BOOKINGS */}
               <button
                 type="button"
                 onClick={() => {
@@ -621,22 +639,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
                 All Bookings ({persistedBookings.length})
               </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setFilterCategory('today');
-                  setFilterDate('all');
-                }}
-                className={`cursor-pointer whitespace-nowrap rounded-full px-3.5 py-1.5 text-xs font-black uppercase tracking-wider transition-colors flex items-center gap-1.5 ${
-                  filterCategory === 'today'
-                    ? 'bg-[#00C6FF] text-black shadow-md shadow-[#00C6FF]/30'
-                    : 'bg-white/10 text-white hover:bg-white/20'
-                }`}
-              >
-                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span>Today's Schedule ({todayBookingsCount})</span>
-              </button>
-
+              {/* 3. UPCOMING SCHEDULES */}
               <button
                 type="button"
                 onClick={() => {
@@ -734,18 +737,35 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
             </div>
 
             <h2 className="font-heading text-xl font-black uppercase text-white sm:text-2xl">
-              {searchTerm || filterDate !== 'all'
+              {filterCategory === 'today'
+                ? "No Bookings for Today Yet"
+                : searchTerm || filterDate !== 'all'
                 ? 'No Matching Bookings'
                 : 'No Saved Bookings Yet'}
             </h2>
 
             <p className="mx-auto mt-2 max-w-md text-xs text-[#B3A2DB] sm:text-sm">
-              {searchTerm || filterDate !== 'all'
+              {filterCategory === 'today'
+                ? `No court reservations scheduled for today (${formatDateToFullReadable(todayStr)}). You can switch to All Bookings or Upcoming to view other scheduled slots.`
+                : searchTerm || filterDate !== 'all'
                 ? 'Try adjusting your search criteria or resetting date filters.'
                 : 'When players select court slots and confirm their reservations via InstaPay, they will appear here in real-time.'}
             </p>
 
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+
+              {filterCategory === 'today' && persistedBookings.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterCategory('all');
+                    setFilterDate('all');
+                  }}
+                  className="cursor-pointer rounded-full bg-[#00C6FF] px-5 py-2 text-xs font-black uppercase text-black transition-transform hover:scale-105 shadow-md shadow-[#00C6FF]/30"
+                >
+                  View All Bookings ({persistedBookings.length})
+                </button>
+              )}
 
               {(searchTerm || filterDate !== 'all') && (
                 <button
@@ -763,7 +783,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
               <button
                 type="button"
                 onClick={() => navigate('/')}
-                className="cursor-pointer rounded-full bg-[#00C6FF] px-6 py-2.5 text-xs font-black uppercase tracking-wider text-black transition-all hover:bg-[#00C6FF]/90"
+                className="cursor-pointer rounded-full bg-white/10 border border-white/20 px-6 py-2 text-xs font-bold uppercase tracking-wider text-white transition-all hover:bg-white/20"
               >
                 Go to Court Booking Matrix
               </button>
