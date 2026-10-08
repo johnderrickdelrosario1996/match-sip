@@ -63,3 +63,31 @@ export function getNextWeekendDay(dateStr: string, targetDay: 0 | 6): string {
   const dayNum = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${dayNum}`;
 }
+
+/**
+ * Formats a confirmed timestamp ISO string, timestamp number, or date string into a clear readable string.
+ * Example output: "Sep 28, 2026 • 01:57 AM"
+ */
+export function formatConfirmedTimestamp(timestamp?: string | number | null): string {
+  if (!timestamp) return 'Time not recorded';
+  try {
+    const d = new Date(timestamp);
+    if (isNaN(d.getTime())) return String(timestamp);
+
+    const datePart = d.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+
+    const timePart = d.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+
+    return `${datePart} • ${timePart}`;
+  } catch {
+    return String(timestamp);
+  }
+}

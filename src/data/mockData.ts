@@ -43,7 +43,7 @@ export function generateSlotsForCourt(courtId: 'court-1' | 'court-2', dateStr: s
       courtName,
       startTime: slot.start,
       endTime: slot.end,
-      timeLabel: `${slot.start} - ${slot.end}`,
+      timeLabel: `${slot.start}-${slot.end}`,
       status: isBooked ? 'BOOKED' : 'OPEN',
       price,
       courtType,

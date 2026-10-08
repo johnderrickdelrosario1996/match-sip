@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { ConfirmedBooking, SelectedSlot, CourtId } from '../types';
 import { HOURLY_RANGES, BASE_PRICE_OFFPEAK, BASE_PRICE_PRIME } from '../data/mockData';
+import { formatConfirmedTimestamp } from '../utils/dateUtils';
 
 interface EditBookingModalProps {
   booking: ConfirmedBooking | null;
@@ -256,6 +257,9 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
             <h2 id="edit-booking-title" className="font-heading text-xl font-black uppercase text-white">
               Edit #{booking.bookingReference}
             </h2>
+            <span className="text-[11px] text-[#B3A2DB] block mt-0.5">
+              Confirmed: <strong className="text-white">{formatConfirmedTimestamp(booking.confirmedAt || booking.createdAt)}</strong>
+            </span>
           </div>
           <button
             type="button"
@@ -429,8 +433,9 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
             <div className="space-y-3">
               {slots.map((slot, index) => {
                 // Check if current time matches one of the standard HOURLY_RANGES
+                const cleanSlotTime = (slot.timeLabel || '').replace(/\s+/g, '');
                 const isStandardPreset = HOURLY_RANGES.some(
-                  (h) => `${h.start} - ${h.end}` === slot.timeLabel
+                  (h) => `${h.start}-${h.end}` === cleanSlotTime || `${h.start} - ${h.end}` === slot.timeLabel
                 );
 
                 return (

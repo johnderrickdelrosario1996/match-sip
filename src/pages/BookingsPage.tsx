@@ -18,16 +18,25 @@ import {
   Check,
   Lock,
   Mail,
+  FileText,
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
 import { 
   deleteBookingFromFirestore, 
   updateBookingInFirestore,
   sendAdminBookingNotification,
+  validateSlotsLiveAvailability,
 } from '../services/bookingService';
 import { EditBookingModal } from '../components/EditBookingModal';
+import { AddBookingModal } from '../components/AddBookingModal';
 import { CalendarPopup } from '../components/CalendarPopup';
-import { getTodayDateString, formatDateToDDMMYYYY, formatDateToFullReadable } from '../utils/dateUtils';
+import { 
+  getTodayDateString, 
+  formatDateToDDMMYYYY, 
+  formatDateToFullReadable,
+  formatConfirmedTimestamp 
+} from '../utils/dateUtils';
+import { useDebounce } from '../utils/useDebounce';
 
 interface BookingsPageProps {
   persistedBookings: ConfirmedBooking[];
@@ -58,6 +67,15 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   const pinInputRef = React.useRef<HTMLInputElement>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebounce(searchTerm, 250);
+
+  // Optimistic UI state synchronized with props
+  const [localBookings, setLocalBookings] = useState<ConfirmedBooking[]>(persistedBookings);
+
+  useEffect(() => {
+    setLocalBookings(persistedBookings);
+  }, [persistedBookings]);
+
   const [selectedProof, setSelectedProof] = useState<string | null>(null);
   const [filterDate, setFilterDate] = useState<string>('all');
   const [filterCategory, setFilterCategory] = useState<'all' | 'today' | 'upcoming' | 'past'>('today');
@@ -65,6 +83,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   const [isCalendarOpen, setIsCalendarOpen] = useState<boolean>(false);
   const [deletingBookingId, setDeletingBookingId] = useState<string | null>(null);
   const [editingBooking, setEditingBooking] = useState<ConfirmedBooking | null>(null);
+  const [isAddBookingOpen, setIsAddBookingOpen] = useState<boolean>(false);
   const [toastNotification, setToastNotification] = useState<string | null>(null);
   const [sendingEmailBookingId, setSendingEmailBookingId] = useState<string | null>(null);
   const [isSendingTestEmail, setIsSendingTestEmail] = useState<boolean>(false);
@@ -176,16 +195,16 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   // CATEGORY METRIC COUNTS
   // ---------------------------------------------------------
   const todayBookingsCount = useMemo(() => {
-    return persistedBookings.filter((b) => b.selectedDate === todayStr).length;
-  }, [persistedBookings, todayStr]);
+    return localBookings.filter((b) => b.selectedDate === todayStr).length;
+  }, [localBookings, todayStr]);
 
   const upcomingBookingsCount = useMemo(() => {
-    return persistedBookings.filter((b) => (b.selectedDate || '') > todayStr).length;
-  }, [persistedBookings, todayStr]);
+    return localBookings.filter((b) => (b.selectedDate || '') > todayStr).length;
+  }, [localBookings, todayStr]);
 
   const pastBookingsCount = useMemo(() => {
-    return persistedBookings.filter((b) => (b.selectedDate || '') < todayStr).length;
-  }, [persistedBookings, todayStr]);
+    return localBookings.filter((b) => (b.selectedDate || '') < todayStr).length;
+  }, [localBookings, todayStr]);
 
   // ---------------------------------------------------------
   // FILTER AND CHRONOLOGICALLY SORT BOOKINGS
@@ -194,7 +213,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   // ---------------------------------------------------------
   const filteredBookings = useMemo(() => {
     // 1. Filter
-    const filtered = persistedBookings.filter((booking) => {
+    const filtered = localBookings.filter((booking) => {
       // Category filter
       if (filterCategory === 'today' && booking.selectedDate !== todayStr) {
         return false;
@@ -213,8 +232,8 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         return false;
       }
 
-      // Search query filter
-      const query = searchTerm.toLowerCase().trim();
+      // Search query filter (debounced)
+      const query = debouncedSearchTerm.toLowerCase().trim();
       if (!query) {
         return true;
       }
@@ -223,7 +242,8 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         (booking.bookingReference || '').toLowerCase().includes(query) ||
         (booking.customer?.fullName || '').toLowerCase().includes(query) ||
         (booking.customer?.phoneNumber || '').toLowerCase().includes(query) ||
-        (booking.selectedDate || '').toLowerCase().includes(query)
+        (booking.selectedDate || '').toLowerCase().includes(query) ||
+        (booking.customer?.notes || '').toLowerCase().includes(query)
       );
     });
 
@@ -274,45 +294,45 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         // Within Today (rank 0): chronological by slot time (08:00 -> 24:00)
         if (rankA === 0) {
           if (timeA !== timeB) return timeA.localeCompare(timeB);
-          return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+          return (b.confirmedAt || b.createdAt || b.bookingReference).localeCompare(a.confirmedAt || a.createdAt || a.bookingReference);
         }
 
         // Within Upcoming (rank 1): chronological by date ascending, then slot time
         if (rankA === 1) {
           if (dateA !== dateB) return dateA.localeCompare(dateB);
           if (timeA !== timeB) return timeA.localeCompare(timeB);
-          return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+          return (b.confirmedAt || b.createdAt || b.bookingReference).localeCompare(a.confirmedAt || a.createdAt || a.bookingReference);
         }
 
         // Within Past (rank 2): most recent past day first down to older past dates
         if (dateA !== dateB) return dateB.localeCompare(dateA);
         if (timeA !== timeB) return timeA.localeCompare(timeB);
-        return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+        return (b.confirmedAt || b.createdAt || b.bookingReference).localeCompare(a.confirmedAt || a.createdAt || a.bookingReference);
       }
 
       if (sortOrder === 'newest-first') {
         // Date descending, then time
         if (dateA !== dateB) return dateB.localeCompare(dateA);
         if (timeA !== timeB) return timeB.localeCompare(timeA);
-        return (b.createdAt || b.bookingReference).localeCompare(a.createdAt || a.bookingReference);
+        return (b.confirmedAt || b.createdAt || b.bookingReference).localeCompare(a.confirmedAt || a.createdAt || a.bookingReference);
       }
 
       // 'oldest-first'
       if (dateA !== dateB) return dateA.localeCompare(dateB);
       if (timeA !== timeB) return timeA.localeCompare(timeB);
-      return (a.createdAt || a.bookingReference).localeCompare(b.createdAt || b.bookingReference);
+      return (a.confirmedAt || a.createdAt || a.bookingReference).localeCompare(b.confirmedAt || b.createdAt || b.bookingReference);
     });
-  }, [persistedBookings, filterCategory, filterDate, searchTerm, sortOrder, todayStr]);
+  }, [localBookings, filterCategory, filterDate, debouncedSearchTerm, sortOrder, todayStr]);
 
   // ---------------------------------------------------------
   // CALCULATE METRICS
   // ---------------------------------------------------------
-  const totalRevenue = persistedBookings.reduce(
+  const totalRevenue = localBookings.reduce(
     (sum, booking) => sum + (Number(booking.totalAmount) || 0),
     0
   );
 
-  const totalSlotsCount = persistedBookings.reduce(
+  const totalSlotsCount = localBookings.reduce(
     (sum, booking) => sum + (booking.slots?.length || 0),
     0
   );
@@ -329,7 +349,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   ).sort((a, b) => b.localeCompare(a));
 
   // ---------------------------------------------------------
-  // DELETE BOOKING
+  // DELETE BOOKING (With Optimistic UI Update & Rollback)
   // ---------------------------------------------------------
   const handleDeleteBooking = async (booking: ConfirmedBooking) => {
     const bookingId = booking.id || booking.bookingReference;
@@ -343,12 +363,21 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
     );
     if (!confirmed) return;
 
+    // Snapshot previous state for rollback on error
+    const previousState = localBookings;
+
+    // 1. Optimistic removal: instantly vanishes from UI
+    setLocalBookings((prev) => prev.filter((b) => b.id !== bookingId && b.bookingReference !== bookingId));
+    setDeletingBookingId(bookingId);
+
     try {
-      setDeletingBookingId(bookingId);
+      // 2. Perform server delete
       await deleteBookingFromFirestore(bookingId);
       showNotification(`Reservation #${booking.bookingReference} was deleted successfully.`);
     } catch (error) {
       console.error('Error deleting booking:', error);
+      // 3. Rollback on network failure
+      setLocalBookings(previousState);
       alert('Failed to delete booking. Please check your network and try again.');
     } finally {
       setDeletingBookingId(null);
@@ -356,7 +385,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   };
 
   // ---------------------------------------------------------
-  // UPDATE / EDIT BOOKING
+  // UPDATE / EDIT BOOKING (With Optimistic UI Update)
   // ---------------------------------------------------------
   const handleSaveEdit = async (
     bookingId: string,
@@ -374,8 +403,48 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
     if (!idToUpdate) {
       throw new Error('Missing booking reference/ID for update.');
     }
-    await updateBookingInFirestore(idToUpdate, updates);
-    showNotification(`Reservation #${editingBooking?.bookingReference || idToUpdate} updated successfully.`);
+
+    // 0. Live verification: ensure edited slots are not occupied by another booking
+    if (updates.slots && updates.slots.length > 0) {
+      const check = await validateSlotsLiveAvailability(updates.slots, updates.selectedDate, idToUpdate);
+      if (!check.isAvailable) {
+        showNotification(`⚠️ Slot Conflict: ${check.conflictReason}`);
+        throw new Error(check.conflictReason);
+      }
+    }
+
+    // 1. Optimistic local update
+    const previousState = localBookings;
+    setLocalBookings((prev) =>
+      prev.map((b) => {
+        if (b.id === idToUpdate || b.bookingReference === idToUpdate) {
+          return {
+            ...b,
+            customer: {
+              ...b.customer,
+              fullName: updates.fullName,
+              phoneNumber: updates.phoneNumber,
+              notes: updates.notes !== undefined ? updates.notes : b.customer.notes,
+            },
+            selectedDate: updates.selectedDate,
+            status: updates.status,
+            totalAmount: updates.totalAmount,
+            slots: updates.slots || b.slots,
+          };
+        }
+        return b;
+      })
+    );
+
+    try {
+      // 2. Persist to Firestore
+      await updateBookingInFirestore(idToUpdate, updates);
+      showNotification(`Reservation #${editingBooking?.bookingReference || idToUpdate} updated successfully.`);
+    } catch (error) {
+      // Rollback on failure
+      setLocalBookings(previousState);
+      throw error;
+    }
   };
 
   // ---------------------------------------------------------
@@ -484,7 +553,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
       <div className="w-full border-b border-[#B3A2DB]/30 bg-[#5E2CB2] py-4">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
 
-          <div className="flex items-center gap-3 ml-auto justify-end">
+          <div className="flex items-center gap-3 ml-auto justify-end flex-wrap">
 
             {/* LOCK / LOGOUT BUTTON */}
             <button
@@ -684,6 +753,17 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
                   </span>
                 )}
               </button>
+
+              {/* QUICK ADD BOOKING RECORD BUTTON */}
+              <button
+                type="button"
+                onClick={() => setIsAddBookingOpen(true)}
+                className="cursor-pointer whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 bg-emerald-400/20 border border-emerald-400/60 text-emerald-300 hover:bg-emerald-400/35 hover:text-white shadow-sm ml-auto"
+                title="Add a manual booking record"
+              >
+                <PlusCircle className="h-3.5 w-3.5 text-emerald-400" />
+                <span>Add Record</span>
+              </button>
             </div>
 
             {/* Active Date Filter Banner */}
@@ -753,6 +833,16 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
             </p>
 
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+
+              {/* DIRECT ADD RECORD BUTTON IN EMPTY STATE */}
+              <button
+                type="button"
+                onClick={() => setIsAddBookingOpen(true)}
+                className="cursor-pointer rounded-full bg-emerald-400 border border-emerald-300 px-5 py-2 text-xs font-black uppercase tracking-wider text-black shadow-lg shadow-emerald-400/25 transition-transform hover:scale-105 active:scale-95 flex items-center gap-1.5"
+              >
+                <PlusCircle className="h-4 w-4" />
+                <span>Add A Booking Record</span>
+              </button>
 
               {filterCategory === 'today' && persistedBookings.length > 0 && (
                 <button
@@ -910,6 +1000,19 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
 
                       </div>
 
+                      {/* CONFIRMED TIMESTAMP */}
+                      <div className="flex items-center gap-2 text-[11px] font-semibold text-[#5E2CB2]/75 pt-0.5">
+
+                        <Clock className="h-3.5 w-3.5 shrink-0 text-[#00C6FF]" />
+
+                        <span>Confirmed:</span>
+
+                        <span className="font-mono text-[#5E2CB2] font-bold">
+                          {formatConfirmedTimestamp(booking.confirmedAt || booking.createdAt)}
+                        </span>
+
+                      </div>
+
                     </div>
 
                     {/* DATE & RESERVED SLOTS */}
@@ -962,7 +1065,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
                               <Clock className="h-3 w-3 text-[#5E2CB2]/70" />
 
                               <span>
-                                {slot.courtName}: {slot.timeLabel}
+                                {slot.courtName}: {slot.timeLabel.replace(/\s*-\s*/, '-')}
                               </span>
                             </div>
                           ))
@@ -974,6 +1077,44 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
 
                       </div>
 
+                    </div>
+
+                    {/* NOTE / SPECIAL REQUESTS */}
+                    <div className="mt-3 border-t border-[#B3A2DB]/20 pt-2.5">
+                      {booking.customer?.notes && booking.customer.notes.trim() ? (
+                        <div
+                          onClick={() => setEditingBooking(booking)}
+                          title="Click to edit special requests in Modify Reservation"
+                          className="group/note cursor-pointer rounded-xl bg-amber-500/10 hover:bg-amber-500/15 border border-amber-500/30 hover:border-amber-500/50 p-2.5 text-xs transition-all"
+                        >
+                          <div className="flex items-center justify-between gap-1.5 mb-1">
+                            <div className="flex items-center gap-1.5 font-bold text-amber-800 text-[11px] uppercase tracking-wider">
+                              <FileText className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                              <span>Notes / Special Requests</span>
+                            </div>
+                            <span className="text-[10px] text-amber-700/80 group-hover/note:text-amber-800 font-semibold opacity-0 group-hover/note:opacity-100 transition-opacity flex items-center gap-0.5">
+                              <Pencil className="h-2.5 w-2.5" /> Edit
+                            </span>
+                          </div>
+                          <p className="text-xs text-[#5E2CB2] font-semibold leading-relaxed break-words whitespace-pre-wrap pl-5">
+                            {booking.customer.notes.trim()}
+                          </p>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setEditingBooking(booking)}
+                          title="Click to add note in Modify Reservation"
+                          className="group/note flex items-center gap-1.5 text-[11px] text-[#5E2CB2]/65 hover:text-[#5E2CB2] px-1 py-0.5 transition-colors cursor-pointer text-left w-full rounded-md hover:bg-[#5E2CB2]/5"
+                        >
+                          <FileText className="h-3.5 w-3.5 text-[#5E2CB2]/40 group-hover/note:text-[#00C6FF] shrink-0" />
+                          <span className="font-semibold text-[#5E2CB2]/75">Notes / Special Requests:</span>
+                          <span className="italic text-[#5E2CB2]/50">None</span>
+                          <span className="ml-auto text-[10px] font-bold text-[#0088B0] opacity-0 group-hover/note:opacity-100 transition-opacity flex items-center gap-0.5">
+                            + Add note
+                          </span>
+                        </button>
+                      )}
                     </div>
 
                   </div>
@@ -1100,6 +1241,25 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         </div>
 
       )}
+
+      {/* =====================================================
+          ADD BOOKING RECORD MODAL
+      ====================================================== */}
+      <AddBookingModal
+        isOpen={isAddBookingOpen}
+        onClose={() => setIsAddBookingOpen(false)}
+        onSuccess={(newBooking) => {
+          setLocalBookings((prev) => [
+            newBooking,
+            ...prev.filter((b) => b.bookingReference !== newBooking.bookingReference && b.id !== newBooking.id),
+          ]);
+          showNotification(
+            `Reservation #${newBooking.bookingReference} for ${newBooking.customer.fullName} added successfully!`
+          );
+        }}
+        persistedBookings={persistedBookings}
+        initialDate={filterDate !== 'all' ? filterDate : todayStr}
+      />
 
       {/* =====================================================
           EDIT BOOKING MODAL

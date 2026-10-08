@@ -15,7 +15,8 @@ import {
 import { SelectedSlot, ConfirmedBooking } from '../types';
 import qrCodeImg from '../assets/images/INSTAPAY QR CODE.jpg';
 import paddleUpImg from '../assets/images/Paddleup.jpg';
-import { uploadReceiptToFirebaseStorage, compressImageToBase64 } from '../services/storageService';
+import { uploadReceiptToFirebaseStorage, compressImageToBase64, validateReceiptFile } from '../services/storageService';
+import { validateSlotsLiveAvailability } from '../services/bookingService';
 
 interface RapidCheckoutProps {
   selectedDate: string;
@@ -144,17 +145,11 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
   };
 
   const processFile = (file: File) => {
-    const isImage =
-      (file.type && file.type.startsWith('image/')) ||
-      /\.(png|jpe?g|webp|gif|svg)$/i.test(file.name);
-
-    if (!isImage) {
-      setErrorMessage('Please upload a valid image file (PNG, JPG, JPEG, WEBP)');
-      return;
-    }
-
-    if (file.size > 15 * 1024 * 1024) {
-      setErrorMessage('File size exceeds 15MB. Please choose a smaller photo.');
+    const validation = validateReceiptFile(file);
+    if (!validation.isValid) {
+      setErrorMessage(
+        validation.error || 'Please upload a valid JPG, PNG, or WebP screenshot under 5MB.'
+      );
       return;
     }
 
@@ -245,6 +240,17 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
     setIsSubmitting(true);
 
     try {
+      // 0. Live concurrency guard: verify slots have not been claimed by another player while in checkout
+      const availabilityCheck = await validateSlotsLiveAvailability(selectedSlots, reservationDate);
+      if (!availabilityCheck.isAvailable) {
+        setErrorMessage(
+          availabilityCheck.conflictReason ||
+          'One or more of your selected court slots was just reserved by another player. Please choose an open slot.'
+        );
+        setIsSubmitting(false);
+        return;
+      }
+
       // Ensure we have the payment proof URL (Storage download URL or verified compressed Base64)
       let finalProofUrl = storageDownloadUrl || proofImage;
       if (!finalProofUrl && currentFile) {
@@ -267,6 +273,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
       }
 
       const bookingRef = `MS-${Math.floor(100000 + Math.random() * 900000)}`;
+      const nowIso = new Date().toISOString();
       const newBooking: ConfirmedBooking = {
         bookingReference: bookingRef,
         selectedDate: reservationDate,
@@ -279,7 +286,10 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
         slots: selectedSlots,
         totalAmount: totalPrice,
         paymentProofUrl: finalProofUrl, // Firebase Storage download URL stored inside Cloud Firestore
-        createdAt: new Date().toISOString(),
+        confirmedAt: nowIso,
+        createdAt: nowIso,
+        bookedAt: nowIso,
+        paidAt: nowIso,
         status: 'VERIFIED',
       };
 
@@ -311,9 +321,14 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
           <div className="flex flex-col gap-6">
             {/* Paddle Photo inside a rounded container (rounded-2xl) */}
             <div className="overflow-hidden rounded-2xl border border-[#B3A2DB]/40 bg-[#5E2CB2] shadow-xl">
+              {/* Paddle Photo (Lazy Loaded) */}
               <img
                 src={paddleUpImg}
                 alt="Paddle Up"
+                loading="lazy"
+                decoding="async"
+                width={640}
+                height={360}
                 className="w-full aspect-[16/9] object-cover"
                 referrerPolicy="no-referrer"
               />
@@ -344,7 +359,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                         className="flex items-center justify-between text-xs sm:text-sm py-1 border-b border-[#B3A2DB]/20 last:border-0"
                       >
                         <span className="font-bold text-[#FFFFFF]">
-                          {s.courtName}: {s.timeLabel}
+                          {s.courtName}: {s.timeLabel.replace(/\s*-\s*/, '-')}
                         </span>
                         <span className="font-mono text-[#00C6FF] font-bold">
                           ₱{s.price}
@@ -531,13 +546,13 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
               {/* Payment Proof Upload Area */}
               <div className="space-y-2">
                 <label className="block text-[11px] sm:text-xs font-bold uppercase tracking-wider text-[#B3A2DB]">
-                  PAYMENT PROOF (JPG OR PNG)
+                  PAYMENT PROOF (JPG, PNG, OR WEBP • MAX 5MB)
                 </label>
 
                 <input
                   type="file"
                   ref={fileInputRef}
-                  accept="image/png, image/jpeg, image/jpg, image/webp"
+                  accept="image/png,image/jpeg,image/webp"
                   onChange={handleFileChange}
                   className="hidden"
                 />
@@ -557,7 +572,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                   >
                     <Upload className="h-5 w-5 text-[#00C6FF] shrink-0" />
                     <span className="text-xs sm:text-sm font-medium text-[#FFFFFF]">
-                      Upload payment screenshot (.jpg or .png)
+                      Upload payment screenshot (JPG, PNG, or WebP &bull; Max 5MB)
                     </span>
                   </div>
                 ) : (

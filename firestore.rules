@@ -14,5 +14,10 @@ service cloud.firestore {
       // Allow updates and deletions for booking management
       allow update, delete: if true;
     }
+    match /court_slot_locks/{lockId} {
+      // Allow atomic reads, reservations and releases for preventing double booking
+      allow read: if true;
+      allow write: if true;
+    }
   }
 }

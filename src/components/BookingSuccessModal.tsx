@@ -1,6 +1,7 @@
 import React from 'react';
-import { CheckCircle2, X, MapPin, Download, Sparkles } from 'lucide-react';
+import { CheckCircle2, X, MapPin, Download, Sparkles, Clock } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
+import { formatConfirmedTimestamp } from '../utils/dateUtils';
 
 interface BookingSuccessModalProps {
   booking: ConfirmedBooking | null;
@@ -79,6 +80,15 @@ export const BookingSuccessModal: React.FC<BookingSuccessModalProps> = ({ bookin
               <span className="text-[#B3A2DB]">Reservation Date:</span>
               <span className="font-bold text-[#FFFFFF]">{booking.selectedDate}</span>
             </div>
+            <div className="flex justify-between items-center">
+              <span className="text-[#B3A2DB] flex items-center gap-1">
+                <Clock className="h-3 w-3 text-[#00C6FF]" />
+                <span>Confirmed At:</span>
+              </span>
+              <span className="font-mono font-semibold text-[#00C6FF]">
+                {formatConfirmedTimestamp(booking.confirmedAt || booking.createdAt)}
+              </span>
+            </div>
             <div className="flex justify-between">
               <span className="text-[#B3A2DB]">Total Paid:</span>
               <span className="font-mono font-extrabold text-[#00C6FF] text-sm">
@@ -100,7 +110,7 @@ export const BookingSuccessModal: React.FC<BookingSuccessModalProps> = ({ bookin
                 >
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-[#00C6FF]">{s.courtName}</span>
-                    <span className="text-[#B3A2DB] font-mono">{s.timeLabel}</span>
+                    <span className="text-[#B3A2DB] font-mono">{s.timeLabel.replace(/\s*-\s*/, '-')}</span>
                   </div>
                   <span className="font-mono font-semibold text-[#FFFFFF]">₱{s.price}</span>
                 </div>

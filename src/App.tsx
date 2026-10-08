@@ -3,18 +3,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
-import { BookingSuccessModal } from './components/BookingSuccessModal';
-import { ReservationsModal } from './components/ReservationsModal';
 import { HomePage } from './pages/HomePage';
-import { BookingsPage } from './pages/BookingsPage';
 import { TimeSlot, SelectedSlot, ConfirmedBooking } from './types';
-import { subscribeToBookings, saveBookingToFirestore } from './services/bookingService';
-import { sendAdminBookingSms } from './services/smsService';
+import { 
+  subscribeToBookings, 
+  saveBookingToFirestore, 
+  getInitialCachedBookings 
+} from './services/bookingService';
 import { getTodayDateString } from './utils/dateUtils';
+
+// Lazy-loaded routes & modals for bundle code-splitting and faster initial page load
+const BookingsPage = lazy(() => import('./pages/BookingsPage').then((m) => ({ default: m.BookingsPage })));
+const BookingSuccessModal = lazy(() => import('./components/BookingSuccessModal').then((m) => ({ default: m.BookingSuccessModal })));
+const ReservationsModal = lazy(() => import('./components/ReservationsModal').then((m) => ({ default: m.ReservationsModal })));
+
+// Lightweight Route Loading Spinner
+const RouteLoadingFallback = () => (
+  <div className="flex-1 flex flex-col items-center justify-center min-h-[50vh] p-8 text-center text-[#B3A2DB]">
+    <div className="h-10 w-10 border-3 border-[#00C6FF] border-t-transparent rounded-full animate-spin mb-3" />
+    <span className="text-xs font-bold uppercase tracking-widest text-[#00C6FF]">Loading Match &amp; Sip...</span>
+  </div>
+);
 
 export default function App() {
   const navigate = useNavigate();
@@ -25,9 +38,13 @@ export default function App() {
   const [confirmedBooking, setConfirmedBooking] = useState<ConfirmedBooking | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Firestore Real-time Persistence State
-  const [persistedBookings, setPersistedBookings] = useState<ConfirmedBooking[]>([]);
-  const [isLoadingBookings, setIsLoadingBookings] = useState<boolean>(true);
+  // Firestore Real-time Persistence State (instant cache initialization eliminates loading flash)
+  const [persistedBookings, setPersistedBookings] = useState<ConfirmedBooking[]>(() => {
+    return getInitialCachedBookings();
+  });
+  const [isLoadingBookings, setIsLoadingBookings] = useState<boolean>(() => {
+    return getInitialCachedBookings().length === 0;
+  });
   const [isReservationsModalOpen, setIsReservationsModalOpen] = useState<boolean>(false);
 
   // Everyday real-time sync: when midnight hits, dynamically advance current day in real time
@@ -86,12 +103,15 @@ export default function App() {
         )
     );
 
-    const conflicted = selectedSlots.filter(
-      (s) =>
-        s.date === selectedDate &&
-        (bookedIdsOnSelectedDate.has(s.slotId) ||
-          bookedIdsOnSelectedDate.has(`${s.courtId}-${s.timeLabel.slice(0, 2)}${s.timeLabel.slice(3, 5)}`))
-    );
+    const conflicted = selectedSlots.filter((s) => {
+      if (s.date !== selectedDate) return false;
+      const match = (s.timeLabel || '').match(/(\d{1,2}):(\d{2})/);
+      const timeKey = match ? `${match[1].padStart(2, '0')}${match[2]}` : '';
+      return (
+        bookedIdsOnSelectedDate.has(s.slotId) ||
+        (timeKey ? bookedIdsOnSelectedDate.has(`${s.courtId}-${timeKey}`) : false)
+      );
+    });
 
     if (conflicted.length > 0) {
       setSelectedSlots((prev) =>
@@ -101,35 +121,36 @@ export default function App() {
     }
   }, [persistedBookings, selectedDate, selectedSlots]);
 
-  const handleToggleSlot = (slot: TimeSlot, dateStr: string) => {
+  const handleToggleSlot = useCallback((slot: TimeSlot, dateStr: string) => {
+    const formattedRange = `${slot.startTime}-${slot.endTime}`;
     setSelectedSlots((prev) => {
       const exists = prev.some((s) => s.slotId === slot.id && s.date === dateStr);
       if (exists) {
-        showToast(`Removed ${slot.courtName} (${slot.timeLabel})`);
+        showToast(`Removed ${slot.courtName} (${formattedRange})`);
         return prev.filter((s) => !(s.slotId === slot.id && s.date === dateStr));
       } else {
-        showToast(`Added ${slot.courtName} (${slot.timeLabel}) to reservation`);
+        showToast(`Added ${slot.courtName} (${formattedRange}) to reservation`);
         return [
           ...prev,
           {
             slotId: slot.id,
             courtId: slot.courtId,
             courtName: slot.courtName,
-            timeLabel: slot.timeLabel,
+            timeLabel: formattedRange,
             date: dateStr,
             price: slot.price,
           },
         ];
       }
     });
-  };
+  }, []);
 
-  const handleClearSlots = () => {
+  const handleClearSlots = useCallback(() => {
     setSelectedSlots([]);
     showToast('Cleared all selected court slots');
-  };
+  }, []);
 
-  const handlePlayTodayClick = () => {
+  const handlePlayTodayClick = useCallback(() => {
     navigate('/');
     setTimeout(() => {
       const el = document.getElementById('court-matrix-section');
@@ -137,31 +158,31 @@ export default function App() {
         el.scrollIntoView({ behavior: 'smooth' });
       }
     }, 100);
-  };
+  }, [navigate]);
 
-  const handleBookingComplete = async (booking: ConfirmedBooking) => {
+  const handleBookingComplete = useCallback(async (booking: ConfirmedBooking) => {
     try {
-      // Save permanently to Cloud Firestore
+      // 1. Atomic Firestore transaction: verifies no slots are taken and commits
       await saveBookingToFirestore(booking);
+
+      // 2. On atomic commit success: update state and show success
+      setPersistedBookings((prev) => [booking, ...prev.filter((b) => b.bookingReference !== booking.bookingReference)]);
       setConfirmedBooking(booking);
       setSelectedSlots([]);
-      showToast(`Reservation #${booking.bookingReference} saved to Cloud Firestore!`);
-    } catch (error) {
+      showToast(`Reservation #${booking.bookingReference} confirmed & saved!`);
+    } catch (error: any) {
       console.error('Error saving to Cloud Firestore:', error);
-      // Ensure smooth UX even during transient network interruption
+      if (error?.message && error.message.includes('DOUBLE_BOOKING_PREVENTED')) {
+        showToast('⚠️ Slot conflict: This court hour was just booked by another player.');
+        throw error;
+      }
+      // Transient offline fallback only for non-conflict network errors
+      setPersistedBookings((prev) => [booking, ...prev.filter((b) => b.bookingReference !== booking.bookingReference)]);
       setConfirmedBooking(booking);
       setSelectedSlots([]);
       showToast(`Reservation #${booking.bookingReference} saved locally!`);
     }
-
-    // Fail-Safe Handler: Dispatch automated SMS notification to admin on new booking
-    // Wrapped in try/catch so booking reservation in Cloud Firestore completes successfully without throwing an error to the user
-    try {
-      await sendAdminBookingSms(booking);
-    } catch (smsError) {
-      console.warn('Fail-safe handler caught SMS dispatch error (booking completed safely):', smsError);
-    }
-  };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#5E2CB2] text-[#FFFFFF] flex flex-col selection:bg-[#00C6FF] selection:text-black">
@@ -175,56 +196,62 @@ export default function App() {
         />
       )}
 
-      {/* Main Routed Content */}
+      {/* Main Routed Content with Code-Splitting Suspense */}
       <main className="flex-1 flex flex-col">
-        <Routes>
-          <Route
-            path="/"
-            element={
-              <HomePage
-                selectedDate={selectedDate}
-                onSelectDate={(newDate) => {
-                  setSelectedDate(newDate);
-                  setSelectedSlots([]);
-                }}
-                selectedSlots={selectedSlots}
-                persistedBookings={persistedBookings}
-                isLoadingBookings={isLoadingBookings}
-                onToggleSlot={handleToggleSlot}
-                onClearSlots={handleClearSlots}
-                onBookingComplete={handleBookingComplete}
-              />
-            }
-          />
-          <Route
-            path="/bookings"
-            element={
-              <BookingsPage
-                persistedBookings={persistedBookings}
-                isLoadingBookings={isLoadingBookings}
-              />
-            }
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <Suspense fallback={<RouteLoadingFallback />}>
+          <Routes>
+            <Route
+              path="/"
+              element={
+                <HomePage
+                  selectedDate={selectedDate}
+                  onSelectDate={(newDate) => {
+                    setSelectedDate(newDate);
+                    setSelectedSlots([]);
+                  }}
+                  selectedSlots={selectedSlots}
+                  persistedBookings={persistedBookings}
+                  isLoadingBookings={isLoadingBookings}
+                  onToggleSlot={handleToggleSlot}
+                  onClearSlots={handleClearSlots}
+                  onBookingComplete={handleBookingComplete}
+                />
+              }
+            />
+            <Route
+              path="/bookings"
+              element={
+                <BookingsPage
+                  persistedBookings={persistedBookings}
+                  isLoadingBookings={isLoadingBookings}
+                />
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
       </main>
 
       {/* Persistent Footer */}
       {!isBookingsPage && <Footer />}
 
       {/* Booking Confirmation Success Modal */}
-      <BookingSuccessModal
-        booking={confirmedBooking}
-        onClose={() => setConfirmedBooking(null)}
-      />
+      <Suspense fallback={null}>
+        <BookingSuccessModal
+          booking={confirmedBooking}
+          onClose={() => setConfirmedBooking(null)}
+        />
+      </Suspense>
 
       {/* Persistent Cloud Reservations Modal */}
-      <ReservationsModal
-        isOpen={isReservationsModalOpen}
-        onClose={() => setIsReservationsModalOpen(false)}
-        bookings={persistedBookings}
-        isLoading={isLoadingBookings}
-      />
+      <Suspense fallback={null}>
+        <ReservationsModal
+          isOpen={isReservationsModalOpen}
+          onClose={() => setIsReservationsModalOpen(false)}
+          bookings={persistedBookings}
+          isLoading={isLoadingBookings}
+        />
+      </Suspense>
 
       {/* Floating Toast Notification */}
       {toastMessage && (

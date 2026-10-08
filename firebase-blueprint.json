@@ -59,12 +59,32 @@
         }
       },
       "required": ["bookingReference", "selectedDate", "customer", "slots", "totalAmount", "status"]
+    },
+    "court_slot_lock": {
+      "title": "Court Slot Lock",
+      "description": "Atomic reservation lock preventing double bookings on specific court slots",
+      "type": "object",
+      "properties": {
+        "lockId": { "type": "string" },
+        "bookingReference": { "type": "string" },
+        "date": { "type": "string" },
+        "courtId": { "type": "string" },
+        "courtName": { "type": "string" },
+        "timeLabel": { "type": "string" },
+        "status": { "type": "string" },
+        "lockedAt": { "type": "string" }
+      },
+      "required": ["lockId", "bookingReference", "date", "courtId", "status"]
     }
   },
   "firestore": {
     "/bookings/{bookingId}": {
       "entity": "booking",
       "description": "Individual court reservations"
+    },
+    "/court_slot_locks/{lockId}": {
+      "entity": "court_slot_lock",
+      "description": "Atomic reservation slot locks"
     }
   }
 }

@@ -6,7 +6,7 @@ export interface TimeSlot {
   courtName: string; // 'Court 01' | 'Court 02'
   startTime: string; // '08:00'
   endTime: string; // '09:00'
-  timeLabel: string; // '08:00 - 09:00'
+  timeLabel: string; // '08:00-09:00'
   status: 'OPEN' | 'BOOKED';
   price: number; // in PHP, e.g., 150 or 200
   courtType: string; // 'Championship Blue' | 'Neon Social'
@@ -43,6 +43,7 @@ export interface ConfirmedBooking {
   paymentMethod: 'GCash (PayMongo)' | 'GCash' | 'InstaPay QR' | string;
   bookedAt?: string;
   createdAt?: string;
+  confirmedAt?: string;
   paidAt?: string;
   paymentId?: string;
   status: PaymentVerificationStatus | string;

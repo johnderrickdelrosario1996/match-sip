@@ -13,26 +13,94 @@ export interface UploadResult {
   contentType: string;
 }
 
+// Strict Payment Receipt Upload Constraints
+export const ALLOWED_RECEIPT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
+export const ALLOWED_RECEIPT_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'] as const;
+export const MAX_RECEIPT_FILE_SIZE_BYTES = 5 * 1024 * 1024; // Strictly 5 MB (5,242,880 bytes)
+export const MAX_RECEIPT_FILE_SIZE_MB = 5;
+
+export interface FileValidationResult {
+  isValid: boolean;
+  error?: string;
+}
+
+/**
+ * Validates that an uploaded payment receipt screenshot satisfies strict security rules:
+ * - Only valid image MIME types (image/jpeg, image/png, image/webp)
+ * - Maximum file size capped strictly at 5 MB
+ */
+export function validateReceiptFile(file: File): FileValidationResult {
+  if (!file) {
+    return { isValid: false, error: 'No file selected. Please select a valid payment screenshot.' };
+  }
+
+  // 1. File Size Validation (Strict 5 MB limit)
+  if (file.size > MAX_RECEIPT_FILE_SIZE_BYTES) {
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+    return {
+      isValid: false,
+      error: `File size too large (${sizeMb} MB). Maximum allowed size is ${MAX_RECEIPT_FILE_SIZE_MB} MB. Please upload a smaller photo.`,
+    };
+  }
+
+  if (file.size === 0) {
+    return {
+      isValid: false,
+      error: 'Selected file is empty (0 bytes). Please choose a valid receipt image.',
+    };
+  }
+
+  // 2. File Type / MIME Validation (Strictly JPG, PNG, WEBP)
+  const rawType = (file.type || '').toLowerCase().trim();
+  const nameParts = file.name.split('.');
+  const ext = nameParts.length > 1 ? nameParts.pop()!.toLowerCase().trim() : '';
+
+  const isMimeAllowed = ALLOWED_RECEIPT_MIME_TYPES.includes(rawType as any);
+  const isExtAllowed = ALLOWED_RECEIPT_EXTENSIONS.includes(ext as any);
+
+  // If browser provided a MIME type that isn't allowed, reject
+  if (rawType && !isMimeAllowed) {
+    return {
+      isValid: false,
+      error: `Unsupported file type (${rawType}). Strictly only JPG, PNG, and WebP payment screenshots are allowed.`,
+    };
+  }
+
+  // If extension is not allowed, reject
+  if (!isExtAllowed) {
+    return {
+      isValid: false,
+      error: `Unsupported file extension (.${ext || 'unknown'}). Strictly only .jpg, .jpeg, .png, and .webp files are allowed.`,
+    };
+  }
+
+  // Security guard against non-image scripts masquerading with image extensions
+  if (rawType && !rawType.startsWith('image/')) {
+    return {
+      isValid: false,
+      error: `Invalid file format (${rawType}). Only valid image files are accepted.`,
+    };
+  }
+
+  return { isValid: true };
+}
+
 /**
  * Resolves the MIME content type from the file object or its extension.
  */
 function resolveContentType(file: File): string {
-  if (file.type && file.type.startsWith('image/')) {
-    return file.type;
+  const type = (file.type || '').toLowerCase().trim();
+  if (ALLOWED_RECEIPT_MIME_TYPES.includes(type as any)) {
+    return type;
   }
   const ext = file.name.split('.').pop()?.toLowerCase();
   switch (ext) {
     case 'png':
       return 'image/png';
-    case 'jpg':
-    case 'jpeg':
-      return 'image/jpeg';
     case 'webp':
       return 'image/webp';
-    case 'gif':
-      return 'image/gif';
-    case 'svg':
-      return 'image/svg+xml';
+    case 'jpg':
+    case 'jpeg':
     default:
       return 'image/jpeg';
   }
@@ -62,6 +130,11 @@ export function compressImageToBase64(
   maxHeight = 1000,
   quality = 0.72
 ): Promise<string> {
+  const validation = validateReceiptFile(file);
+  if (!validation.isValid) {
+    return Promise.reject(new Error(validation.error));
+  }
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = (err) => reject(err);
@@ -128,6 +201,12 @@ export async function uploadReceiptToFirebaseStorage(
 ): Promise<UploadResult> {
   if (!file) {
     throw new Error('No file provided for upload.');
+  }
+
+  // Strict MIME and 5MB upload validation
+  const validation = validateReceiptFile(file);
+  if (!validation.isValid) {
+    throw new Error(validation.error);
   }
 
   // Verify Firebase Storage bucket initialization

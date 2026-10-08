@@ -9,10 +9,11 @@ import {
   User, 
   ShieldCheck, 
   ExternalLink,
-  Database
+  Database,
+  FileText
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
-import { getTodayDateString } from '../utils/dateUtils';
+import { getTodayDateString, formatConfirmedTimestamp } from '../utils/dateUtils';
 
 interface ReservationsModalProps {
   isOpen: boolean;
@@ -59,7 +60,8 @@ export const ReservationsModal: React.FC<ReservationsModalProps> = ({
         b.bookingReference.toLowerCase().includes(q) ||
         b.customer.fullName.toLowerCase().includes(q) ||
         b.customer.phoneNumber.toLowerCase().includes(q) ||
-        b.selectedDate.includes(q)
+        b.selectedDate.includes(q) ||
+        (b.customer?.notes || '').toLowerCase().includes(q)
       );
     })
     .sort((a, b) => {
@@ -200,6 +202,10 @@ export const ReservationsModal: React.FC<ReservationsModalProps> = ({
                       <ShieldCheck className="h-3.5 w-3.5 text-[#00C6FF]" />
                       <span>Method: {b.paymentMethod || 'InstaPay QR'}</span>
                     </div>
+                    <div className="flex items-center gap-2 text-[#00C6FF]">
+                      <Clock className="h-3.5 w-3.5 text-[#00C6FF]" />
+                      <span className="font-semibold">{formatConfirmedTimestamp(b.confirmedAt || b.createdAt)}</span>
+                    </div>
                   </div>
 
                   {/* Reserved Slots */}
@@ -214,11 +220,26 @@ export const ReservationsModal: React.FC<ReservationsModalProps> = ({
                           className="inline-flex items-center gap-1 rounded-md bg-[#5E2CB2] px-2 py-1 text-[11px] font-semibold text-[#FFFFFF] border border-[#B3A2DB]/40"
                         >
                           <Clock className="h-3 w-3 text-[#00C6FF]" />
-                          {s.courtName}: {s.timeLabel}
+                          {s.courtName}: {s.timeLabel.replace(/\s*-\s*/, '-')}
                         </span>
                       ))}
                     </div>
                   </div>
+
+                  {/* Note / Special Requests */}
+                  {b.customer?.notes && b.customer.notes.trim() ? (
+                    <div className="mt-2 pt-2 border-t border-[#B3A2DB]/20">
+                      <div className="rounded-lg bg-amber-400/10 border border-amber-400/25 p-2 text-xs">
+                        <div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-300 mb-0.5">
+                          <FileText className="h-3 w-3 text-amber-400 shrink-0" />
+                          <span>Notes / Special Requests:</span>
+                        </div>
+                        <p className="text-[11px] text-white/90 font-medium leading-relaxed break-words whitespace-pre-wrap pl-4">
+                          {b.customer.notes.trim()}
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Footer proof view if available */}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Search, 
   Calendar, 
@@ -9,9 +9,12 @@ import {
   ShieldCheck, 
   Database,
   ExternalLink,
-  X
+  X,
+  FileText
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
+import { formatConfirmedTimestamp } from '../utils/dateUtils';
+import { useDebounce } from '../utils/useDebounce';
 
 interface SavedBookingsSectionProps {
   bookings: ConfirmedBooking[];
@@ -25,18 +28,20 @@ export const SavedBookingsSection: React.FC<SavedBookingsSectionProps> = ({
   onScrollToMatrix,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebounce(searchTerm, 250);
   const [selectedProof, setSelectedProof] = useState<string | null>(null);
 
-  const filteredBookings = bookings.filter((b) => {
-    const q = searchTerm.toLowerCase().trim();
-    if (!q) return true;
-    return (
+  const filteredBookings = useMemo(() => {
+    const q = debouncedSearchTerm.toLowerCase().trim();
+    if (!q) return bookings;
+    return bookings.filter((b) => 
       b.bookingReference.toLowerCase().includes(q) ||
       b.customer.fullName.toLowerCase().includes(q) ||
       b.customer.phoneNumber.toLowerCase().includes(q) ||
-      b.selectedDate.includes(q)
+      b.selectedDate.includes(q) ||
+      (b.customer?.notes || '').toLowerCase().includes(q)
     );
-  });
+  }, [bookings, debouncedSearchTerm]);
 
   return (
     <section id="saved-bookings-section" className="w-full bg-[#FFFFFF] text-[#5E2CB2] py-14 sm:py-20 border-t-2 border-[#B3A2DB]/30">
@@ -135,6 +140,13 @@ export const SavedBookingsSection: React.FC<SavedBookingsSectionProps> = ({
                       <Phone className="h-3 w-3 text-[#5E2CB2]/70 shrink-0" />
                       <span>{b.customer.phoneNumber}</span>
                     </div>
+                    <div className="flex items-center gap-2 text-[11px] font-semibold text-[#5E2CB2]/75 pt-0.5">
+                      <Clock className="h-3 w-3 text-[#00C6FF] shrink-0" />
+                      <span>Confirmed:</span>
+                      <span className="font-mono text-[#5E2CB2] font-bold">
+                        {formatConfirmedTimestamp(b.confirmedAt || b.createdAt)}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Reserved Slots */}
@@ -152,11 +164,26 @@ export const SavedBookingsSection: React.FC<SavedBookingsSectionProps> = ({
                           key={`${s.slotId}-${idx}`}
                           className="rounded-md bg-[#5E2CB2]/10 px-2 py-0.5 text-[11px] font-bold text-[#5E2CB2]"
                         >
-                          {s.courtName}: {s.timeLabel}
+                          {s.courtName}: {s.timeLabel.replace(/\s*-\s*/, '-')}
                         </span>
                       ))}
                     </div>
                   </div>
+
+                  {/* Note / Special Requests */}
+                  {b.customer?.notes && b.customer.notes.trim() ? (
+                    <div className="mt-2.5 pt-2 border-t border-[#B3A2DB]/20">
+                      <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 p-2 text-xs">
+                        <div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-800 mb-0.5">
+                          <FileText className="h-3 w-3 text-amber-600 shrink-0" />
+                          <span>Notes / Special Requests:</span>
+                        </div>
+                        <p className="text-[11px] text-[#5E2CB2] font-semibold leading-relaxed break-words whitespace-pre-wrap pl-4">
+                          {b.customer.notes.trim()}
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Card Bottom: Total & Proof */}

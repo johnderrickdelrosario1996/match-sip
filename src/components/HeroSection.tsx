@@ -50,10 +50,14 @@ export const HeroSection: React.FC<HeroSectionProps> = ({ onQuickBookSubmit }) =
             {/* Relative Image Container to anchor the absolute Quick Book card */}
             <div className="group relative w-full overflow-hidden rounded-2xl sm:rounded-3xl border border-[#B3A2DB]/30 bg-[#5E2CB2]/60 shadow-2xl">
               
-              {/* Court Image */}
+              {/* Court Image (LCP Prioritized) */}
               <img
                 src={courtHeroImg}
                 alt="MATCH&SIP Pickleball Court"
+                width={800}
+                height={480}
+                fetchPriority="high"
+                decoding="async"
                 className="h-[300px] sm:h-[400px] lg:h-[480px] w-full object-cover object-center transition-transform duration-700 ease-out group-hover:scale-105"
                 referrerPolicy="no-referrer"
               />
