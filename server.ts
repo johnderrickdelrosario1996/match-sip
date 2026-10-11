@@ -5,22 +5,18 @@ import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { Resend } from 'resend';
 import QRCode from 'qrcode';
-import { initializeApp, getApps } from 'firebase/app';
+import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
+import { getUsers, getOrCreateUser } from './src/db/users.ts';
 import {
-  initializeFirestore,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  serverTimestamp,
-} from 'firebase/firestore';
-import firebaseConfig from './firebase-applet-config.json';
+  getAllBookings,
+  getBookingsByDate,
+  getBookingByReference,
+  saveBookingWithLocks,
+  deleteBookingByReference,
+  updateBookingFields,
+} from './src/db/bookings.ts';
 
 dotenv.config({ override: true });
-
-// Initialize Firebase App & Firestore for server operations
-const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-const db = initializeFirestore(fbApp, {}, firebaseConfig.firestoreDatabaseId || undefined);
 
 const app = express();
 const PORT = 3000;
@@ -292,6 +288,109 @@ app.post('/api/notify-admin', async (req, res) => {
 });
 
 /**
+ * Cloud SQL & Firebase Auth User Endpoints
+ */
+app.get('/api/users', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const allUsers = await getUsers();
+    res.json({ success: true, users: allUsers });
+  } catch (error: any) {
+    console.error('Failed to fetch users:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch users' });
+  }
+});
+
+app.post('/api/users/sync', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user?.uid;
+    const email = req.user?.email || '';
+    if (!uid) {
+      return res.status(400).json({ error: 'User UID missing from token' });
+    }
+    const syncedUser = await getOrCreateUser(uid, email);
+    res.json({ success: true, user: syncedUser });
+  } catch (error: any) {
+    console.error('Failed to sync user:', error);
+    res.status(500).json({ error: error.message || 'Failed to sync user' });
+  }
+});
+
+/**
+ * Cloud SQL Bookings API
+ */
+app.get('/api/sql/bookings', async (req, res) => {
+  try {
+    const limitCount = req.query.limit ? Number(req.query.limit) : 250;
+    const date = req.query.date as string | undefined;
+    let results;
+    if (date) {
+      results = await getBookingsByDate(date);
+    } else {
+      results = await getAllBookings(limitCount);
+    }
+    res.json({ success: true, bookings: results });
+  } catch (error: any) {
+    console.error('Failed to fetch bookings from Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch bookings' });
+  }
+});
+
+app.get('/api/sql/bookings/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const booking = await getBookingByReference(reference);
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+    res.json({ success: true, booking });
+  } catch (error: any) {
+    console.error('Failed to fetch booking from Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch booking' });
+  }
+});
+
+app.post('/api/sql/bookings', async (req, res) => {
+  try {
+    const bookingInput = req.body;
+    if (!bookingInput || !bookingInput.bookingReference || !bookingInput.selectedDate) {
+      return res.status(400).json({ error: 'bookingReference and selectedDate are required' });
+    }
+    const result = await saveBookingWithLocks(bookingInput);
+    res.json({ success: true, booking: result });
+  } catch (error: any) {
+    console.error('Failed to save booking to Cloud SQL:', error);
+    const isConflict = error?.message?.includes('DOUBLE_BOOKING_PREVENTED');
+    res.status(isConflict ? 409 : 500).json({ error: error.message || 'Failed to save booking' });
+  }
+});
+
+app.put('/api/sql/bookings/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const updates = req.body;
+    const updated = await updateBookingFields(reference, updates);
+    if (!updated) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+    res.json({ success: true, booking: updated });
+  } catch (error: any) {
+    console.error('Failed to update booking in Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to update booking' });
+  }
+});
+
+app.delete('/api/sql/bookings/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const deleted = await deleteBookingByReference(reference);
+    res.json({ success: true, deletedBooking: deleted });
+  } catch (error: any) {
+    console.error('Failed to delete booking in Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete booking' });
+  }
+});
+
+/**
  * 1. CHECKOUT CREATION API (/api/create-checkout)
  * Integrates PayMongo Checkout Session or Source when user clicks BOOK RESERVATION.
  * Generates GCash checkout URL & dynamic QR code, and holds the booking in Firestore.
@@ -320,37 +419,29 @@ app.post('/api/create-checkout', async (req, res) => {
       process.env.APP_URL?.replace(/\/$/, '') ||
       `${protocol}://${host}`;
 
-    // Secure the reservation doc in Cloud Firestore with initial status 'PENDING'
+    // Secure the reservation with initial status 'PENDING' in Cloud SQL
     try {
-      const bookingDocRef = doc(db, 'bookings', bookingReference);
-      await setDoc(
-        bookingDocRef,
-        {
-          bookingReference,
-          selectedDate,
-          paymentMethod: 'GCash (PayMongo)',
-          customer: {
-            fullName: customer?.fullName || 'Customer',
-            phoneNumber: customer?.phoneNumber || '',
-            email: customer?.email || '',
-          },
-          slots: slots.map((s: any) => ({
-            slotId: s.slotId,
-            courtId: s.courtId,
-            courtName: s.courtName,
-            timeLabel: s.timeLabel,
-            date: s.date || selectedDate,
-            price: s.price,
-          })),
-          totalAmount: Number(totalAmount),
-          status: 'PENDING',
-          createdAt: booking.createdAt || new Date().toISOString(),
-          serverTimestamp: serverTimestamp(),
-        },
-        { merge: true }
-      );
-    } catch (dbErr) {
-      console.warn('[MATCH&SIP] Initial booking doc setup notice:', dbErr);
+      await saveBookingWithLocks({
+        bookingReference,
+        selectedDate,
+        paymentMethod: 'GCash (PayMongo)',
+        customerName: customer?.fullName || 'Customer',
+        customerPhone: customer?.phoneNumber || '',
+        customerEmail: customer?.email || '',
+        customerNotes: customer?.notes || '',
+        slots: slots.map((s: any) => ({
+          slotId: s.slotId,
+          courtId: s.courtId,
+          courtName: s.courtName,
+          timeLabel: s.timeLabel,
+          date: s.date || selectedDate,
+          price: s.price,
+        })),
+        totalAmount: Number(totalAmount),
+        status: 'PENDING',
+      });
+    } catch (sqlErr) {
+      console.warn('[MATCH&SIP] Initial booking setup in Cloud SQL notice:', sqlErr);
     }
 
     const paymongoSecretKey = process.env.PAYMONGO_SECRET_KEY?.trim();
@@ -569,31 +660,29 @@ app.post('/api/webhooks/payment', async (req: any, res) => {
 
     console.log(`[MATCH&SIP] Payment confirmed for booking reference: #${bookingReference}`);
 
-    // Automatically update reservation status in Cloud Firestore to 'BOOKED'
-    const bookingDocRef = doc(db, 'bookings', bookingReference);
-    const docSnap = await getDoc(bookingDocRef);
-
-    const updatePayload: Record<string, any> = {
+    // Automatically update reservation status in Cloud SQL to 'BOOKED'
+    await updateBookingFields(bookingReference, {
       status: 'BOOKED',
       paymentMethod: 'GCash (PayMongo)',
-      paidAt: new Date().toISOString(),
-      webhookEventId: payload?.data?.id || 'paymongo_event',
-      serverTimestamp: serverTimestamp(),
-    };
+    });
 
-    if (docSnap.exists()) {
-      await updateDoc(bookingDocRef, updatePayload);
-      const existingData = docSnap.data();
-      // Send real-time admin notification email
+    const bookingData = await getBookingByReference(bookingReference);
+    if (bookingData) {
       await sendAdminNotification({
-        ...existingData,
-        ...updatePayload,
+        bookingReference: bookingData.bookingReference,
+        selectedDate: bookingData.selectedDate,
+        totalAmount: bookingData.totalAmount,
+        status: 'BOOKED',
+        customer: {
+          fullName: bookingData.customerName,
+          phoneNumber: bookingData.customerPhone,
+          email: bookingData.customerEmail,
+        },
+        slots: bookingData.slots,
       });
-    } else {
-      await setDoc(bookingDocRef, updatePayload, { merge: true });
     }
 
-    console.log(`[MATCH&SIP] Booking #${bookingReference} successfully updated to BOOKED in Cloud Firestore.`);
+    console.log(`[MATCH&SIP] Booking #${bookingReference} successfully updated to BOOKED in Cloud SQL.`);
 
     return res.status(200).json({
       received: true,
@@ -618,32 +707,32 @@ app.post('/api/payment/simulate-pay', async (req, res) => {
     }
 
     console.log(`[MATCH&SIP] Simulating GCash payment approval for #${bookingReference}`);
-    const bookingDocRef = doc(db, 'bookings', bookingReference);
-    const docSnap = await getDoc(bookingDocRef);
-
-    const updateData = {
+    await updateBookingFields(bookingReference, {
       status: 'BOOKED',
       paymentMethod: 'GCash (PayMongo)',
-      paidAt: new Date().toISOString(),
-      webhookEventId: `sim_${Date.now()}`,
-      serverTimestamp: serverTimestamp(),
-    };
+    });
 
-    if (docSnap.exists()) {
-      await updateDoc(bookingDocRef, updateData);
+    const bookingData = await getBookingByReference(bookingReference);
+    if (bookingData) {
       await sendAdminNotification({
-        ...docSnap.data(),
-        ...updateData,
+        bookingReference: bookingData.bookingReference,
+        selectedDate: bookingData.selectedDate,
+        totalAmount: bookingData.totalAmount,
+        status: 'BOOKED',
+        customer: {
+          fullName: bookingData.customerName,
+          phoneNumber: bookingData.customerPhone,
+          email: bookingData.customerEmail,
+        },
+        slots: bookingData.slots,
       });
-    } else {
-      await setDoc(bookingDocRef, updateData, { merge: true });
     }
 
     return res.json({
       success: true,
       status: 'BOOKED',
       bookingReference,
-      message: `Reservation #${bookingReference} status updated to BOOKED.`,
+      message: `Reservation #${bookingReference} status updated to BOOKED in Cloud SQL.`,
     });
   } catch (err: any) {
     console.error('[MATCH&SIP] Error simulating payment:', err);
@@ -661,23 +750,26 @@ app.get('/api/payment/status/:reference', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Reference parameter required' });
     }
 
-    const bookingDocRef = doc(db, 'bookings', reference);
-    const docSnap = await getDoc(bookingDocRef);
+    const booking = await getBookingByReference(reference);
 
-    if (!docSnap.exists()) {
+    if (!booking) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
-    const data = docSnap.data();
     return res.json({
       success: true,
       bookingReference: reference,
-      status: data.status || 'PENDING',
-      isBooked: data.status === 'BOOKED',
-      totalAmount: data.totalAmount,
-      customer: data.customer,
-      selectedDate: data.selectedDate,
-      slots: data.slots,
+      status: booking.status || 'PENDING',
+      isBooked: booking.status === 'BOOKED',
+      totalAmount: booking.totalAmount,
+      customer: {
+        fullName: booking.customerName,
+        phoneNumber: booking.customerPhone,
+        email: booking.customerEmail || '',
+        notes: booking.customerNotes || '',
+      },
+      selectedDate: booking.selectedDate,
+      slots: booking.slots,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });

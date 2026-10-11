@@ -133,11 +133,10 @@ export const EditBookingModal: React.FC<EditBookingModalProps> = ({
 
   const handleRemoveSlot = (index: number) => {
     if (slots.length <= 1) {
-      const confirmRemove = window.confirm(
-        'This is the only slot for this reservation. Are you sure you want to remove it?'
-      );
-      if (!confirmRemove) return;
+      setErrorMessage('A reservation must have at least one court slot.');
+      return;
     }
+    setErrorMessage(null);
     setSlots((prev) => prev.filter((_, idx) => idx !== index));
   };
 

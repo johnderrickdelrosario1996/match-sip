@@ -19,6 +19,8 @@ import {
   Lock,
   Mail,
   FileText,
+  Download,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
 import { 
@@ -82,6 +84,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   const [sortOrder, setSortOrder] = useState<'present-first' | 'newest-first' | 'oldest-first'>('present-first');
   const [isCalendarOpen, setIsCalendarOpen] = useState<boolean>(false);
   const [deletingBookingId, setDeletingBookingId] = useState<string | null>(null);
+  const [bookingToDelete, setBookingToDelete] = useState<ConfirmedBooking | null>(null);
   const [editingBooking, setEditingBooking] = useState<ConfirmedBooking | null>(null);
   const [isAddBookingOpen, setIsAddBookingOpen] = useState<boolean>(false);
   const [toastNotification, setToastNotification] = useState<string | null>(null);
@@ -351,34 +354,38 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   // ---------------------------------------------------------
   // DELETE BOOKING (With Optimistic UI Update & Rollback)
   // ---------------------------------------------------------
-  const handleDeleteBooking = async (booking: ConfirmedBooking) => {
-    const bookingId = booking.id || booking.bookingReference;
-    if (!bookingId) {
-      alert('Unable to delete this booking because the booking ID is missing.');
+  const handleDeleteBooking = (booking: ConfirmedBooking) => {
+    setBookingToDelete(booking);
+  };
+
+  const confirmDeleteBooking = async () => {
+    if (!bookingToDelete) return;
+    const target = bookingToDelete;
+    const bookingRef = target.bookingReference || target.id;
+    if (!bookingRef) {
+      showNotification('Unable to delete: booking reference is missing.');
+      setBookingToDelete(null);
       return;
     }
 
-    const confirmed = window.confirm(
-      `Are you sure you want to delete reservation #${booking.bookingReference} for ${booking.customer?.fullName || 'this player'} permanently?\n\nThis will release the reserved court slots.`
-    );
-    if (!confirmed) return;
+    setBookingToDelete(null);
 
     // Snapshot previous state for rollback on error
     const previousState = localBookings;
 
     // 1. Optimistic removal: instantly vanishes from UI
-    setLocalBookings((prev) => prev.filter((b) => b.id !== bookingId && b.bookingReference !== bookingId));
-    setDeletingBookingId(bookingId);
+    setLocalBookings((prev) => prev.filter((b) => b.bookingReference !== bookingRef && b.id !== bookingRef));
+    setDeletingBookingId(bookingRef);
 
     try {
       // 2. Perform server delete
-      await deleteBookingFromFirestore(bookingId);
-      showNotification(`Reservation #${booking.bookingReference} was deleted successfully.`);
+      await deleteBookingFromFirestore(bookingRef);
+      showNotification(`Reservation #${target.bookingReference} was deleted successfully.`);
     } catch (error) {
       console.error('Error deleting booking:', error);
       // 3. Rollback on network failure
       setLocalBookings(previousState);
-      alert('Failed to delete booking. Please check your network and try again.');
+      showNotification('Failed to delete booking. Please check your connection and try again.');
     } finally {
       setDeletingBookingId(null);
     }
@@ -455,6 +462,81 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
       minimumFractionDigits: 0,
       maximumFractionDigits: 2,
     }).format(amount);
+  };
+
+  // ---------------------------------------------------------
+  // EXPORT TO CSV FILE
+  // ---------------------------------------------------------
+  const handleExportCSV = (exportFilteredOnly: boolean = false) => {
+    const listToExport = exportFilteredOnly
+      ? filteredBookings
+      : (localBookings.length > 0 ? localBookings : persistedBookings);
+
+    if (!listToExport || listToExport.length === 0) {
+      showNotification('⚠️ No bookings available to export.');
+      return;
+    }
+
+    const headers = [
+      'Booking Reference',
+      'Reservation Date',
+      'Status',
+      'Player Name',
+      'Phone Number',
+      'Email',
+      'Court Slots Booked',
+      'Total Slots / Hours',
+      'Total Amount (PHP)',
+      'Payment Method',
+      'Receipt URL',
+      'Customer Notes',
+      'Confirmed / Created At',
+    ];
+
+    const escapeCSV = (value: string | number | undefined | null): string => {
+      if (value === undefined || value === null) return '""';
+      const str = String(value).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const rows = listToExport.map((b) => {
+      const slotsDesc = (b.slots || [])
+        .map((s) => `${s.courtName || s.courtId} (${s.timeLabel})`)
+        .join('; ');
+      const totalSlots = (b.slots || []).length;
+
+      return [
+        escapeCSV(b.bookingReference || b.id),
+        escapeCSV(b.selectedDate),
+        escapeCSV(b.status || 'BOOKED'),
+        escapeCSV(b.customer?.fullName || ''),
+        escapeCSV(b.customer?.phoneNumber || ''),
+        escapeCSV(b.customer?.email || ''),
+        escapeCSV(slotsDesc),
+        escapeCSV(totalSlots),
+        escapeCSV(b.totalAmount || 0),
+        escapeCSV(b.paymentMethod || 'GCash'),
+        escapeCSV(b.paymentProofUrl || ''),
+        escapeCSV(b.customer?.notes || ''),
+        escapeCSV(b.confirmedAt || b.createdAt || b.bookedAt || ''),
+      ].join(',');
+    });
+
+    // Prepend UTF-8 BOM (\uFEFF) for full Excel and Google Sheets character fidelity
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const nowYmd = new Date().toISOString().split('T')[0];
+    const filename = `matchsip-bookings-${nowYmd}.csv`;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    showNotification(`📄 Successfully exported ${listToExport.length} booking record(s) to CSV!`);
   };
 
   // =========================================================
@@ -555,6 +637,17 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
 
           <div className="flex items-center gap-3 ml-auto justify-end flex-wrap">
 
+            {/* EXPORT TO CSV BUTTON */}
+            <button
+              type="button"
+              onClick={() => handleExportCSV(false)}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-[#00C6FF]/40 bg-[#00C6FF]/15 px-3.5 py-1.5 text-xs font-bold text-[#00C6FF] transition-all hover:bg-[#00C6FF]/25 hover:border-[#00C6FF]/70 shadow-sm"
+              title="Export all existing bookings in the App to CSV file"
+            >
+              <Download className="h-4 w-4" />
+              <span>Export CSV</span>
+            </button>
+
             {/* LOCK / LOGOUT BUTTON */}
             <button
               type="button"
@@ -593,7 +686,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
 
               <p className="mt-2 max-w-2xl text-xs text-[#B3A2DB] sm:text-sm">
                 Confirmed court reservations stored securely in Cloud
-                Firestore. Filter by player, date, or booking reference code,
+                SQL. Filter by player, date, or booking reference code,
                 and view InstaPay payment receipts.
               </p>
 
@@ -754,11 +847,22 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
                 )}
               </button>
 
+              {/* EXPORT TO CSV BUTTON */}
+              <button
+                type="button"
+                onClick={() => handleExportCSV(false)}
+                className="cursor-pointer whitespace-nowrap rounded-full px-3.5 py-1.5 text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 bg-[#00C6FF]/15 border border-[#00C6FF]/50 text-[#00C6FF] hover:bg-[#00C6FF]/30 hover:text-white shadow-sm ml-auto"
+                title="Export all existing bookings in the App to a CSV file"
+              >
+                <Download className="h-3.5 w-3.5 text-[#00C6FF]" />
+                <span>Export CSV ({localBookings.length || persistedBookings.length})</span>
+              </button>
+
               {/* QUICK ADD BOOKING RECORD BUTTON */}
               <button
                 type="button"
                 onClick={() => setIsAddBookingOpen(true)}
-                className="cursor-pointer whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 bg-emerald-400/20 border border-emerald-400/60 text-emerald-300 hover:bg-emerald-400/35 hover:text-white shadow-sm ml-auto"
+                className="cursor-pointer whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 bg-emerald-400/20 border border-emerald-400/60 text-emerald-300 hover:bg-emerald-400/35 hover:text-white shadow-sm"
                 title="Add a manual booking record"
               >
                 <PlusCircle className="h-3.5 w-3.5 text-emerald-400" />
@@ -800,7 +904,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
             <RefreshCw className="h-8 w-8 animate-spin text-[#00C6FF]" />
 
             <span className="text-sm font-bold text-[#B3A2DB]">
-              Loading confirmed reservations from Cloud Firestore...
+              Loading confirmed reservations from Cloud SQL...
             </span>
 
           </div>
@@ -958,14 +1062,15 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
                         {/* DELETE BUTTON */}
                         <button
                           type="button"
+                          id={`delete-booking-${booking.bookingReference}`}
                           disabled={isDeleting}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleDeleteBooking(booking);
                           }}
-                          className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700 transition-colors cursor-pointer disabled:opacity-40"
-                          title="Delete Booking"
-                          aria-label="Delete Booking"
+                          className="p-1.5 sm:p-2 rounded-xl text-red-500 hover:text-white bg-red-500/10 hover:bg-red-500 border border-red-500/20 hover:border-red-500/40 transition-all duration-150 active:scale-95 cursor-pointer disabled:opacity-40 shadow-sm flex items-center justify-center shrink-0"
+                          title="Delete Reservation"
+                          aria-label="Delete Reservation"
                         >
                           {isDeleting ? (
                             <RefreshCw className="w-4 h-4 animate-spin text-red-500" />
@@ -1289,6 +1394,52 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         title="CALENDAR & PAST BOOKINGS"
         subtitle="Select any past or present date to navigate and view its court bookings"
       />
+
+      {/* =====================================================
+          DELETE CONFIRMATION MODAL (In-app, iframe-safe)
+      ====================================================== */}
+      {bookingToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-in fade-in">
+          <div className="w-full max-w-md rounded-3xl border border-red-500/30 bg-[#4A1E94] p-6 sm:p-8 text-white shadow-2xl animate-in zoom-in-95">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/20 text-red-400 border border-red-500/30">
+              <Trash2 className="h-7 w-7" />
+            </div>
+
+            <h3 className="text-center font-heading text-xl sm:text-2xl font-black uppercase text-white">
+              Delete Reservation?
+            </h3>
+
+            <p className="mt-3 text-center text-xs sm:text-sm text-[#B3A2DB] leading-relaxed">
+              Are you sure you want to permanently delete reservation{' '}
+              <strong className="text-white font-mono">#{bookingToDelete.bookingReference}</strong> for{' '}
+              <strong className="text-white">{bookingToDelete.customer?.fullName || 'this player'}</strong>?
+            </p>
+
+            <div className="mt-4 rounded-xl bg-white/5 border border-white/10 p-3 text-center text-[11px] text-[#00C6FF]">
+              ⚠️ This will release the court slot locks ({bookingToDelete.slots?.length || 0} slot(s)) and make them available for other players.
+            </div>
+
+            <div className="mt-6 flex items-center gap-3">
+              <button
+                type="button"
+                id="cancel-delete-modal-btn"
+                onClick={() => setBookingToDelete(null)}
+                className="flex-1 cursor-pointer rounded-xl border border-white/20 bg-white/10 py-3 text-xs sm:text-sm font-bold text-white hover:bg-white/20 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                id="confirm-delete-modal-btn"
+                onClick={confirmDeleteBooking}
+                className="flex-1 cursor-pointer rounded-xl bg-red-500 hover:bg-red-600 py-3 text-xs sm:text-sm font-black uppercase tracking-wider text-white shadow-lg shadow-red-500/30 transition-all hover:scale-[1.02] active:scale-98"
+              >
+                Delete Reservation
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* =====================================================
           TOAST FEEDBACK

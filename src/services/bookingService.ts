@@ -1,24 +1,5 @@
-import { 
-  collection, 
-  doc, 
-  getDoc,
-  getDocs,
-  setDoc, 
-  updateDoc,
-  deleteDoc,
-  onSnapshot, 
-  query,
-  limit,
-  where,
-  runTransaction,
-  writeBatch,
-  serverTimestamp 
-} from 'firebase/firestore';
-import { db } from '../lib/firebase';
-import { handleFirestoreError, OperationType } from '../lib/firestoreErrors';
 import { ConfirmedBooking, SelectedSlot } from '../types';
 
-const BOOKINGS_COLLECTION = 'bookings';
 const LOCAL_STORAGE_CACHE_KEY = 'matchsip_bookings_cache';
 
 // Client-Side In-Memory Cache with TTL to prevent redundant network fetches
@@ -114,8 +95,42 @@ export function toCanonicalSlotLockId(date: string, courtId: string, timeLabel: 
 }
 
 /**
+ * Helper to build canonical slot ID (e.g. "court-1-0800")
+ */
+export function toCanonicalSlotId(courtId: string, timeLabel: string): string {
+  const match = (timeLabel || '').match(/(\d{1,2}):(\d{2})/);
+  const timeDigits = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
+  return `${courtId || 'court-1'}-${timeDigits}`;
+}
+
+/**
+ * Convert Cloud SQL row to frontend ConfirmedBooking interface
+ */
+export function mapSqlRowToBooking(row: any): ConfirmedBooking {
+  return {
+    id: row.bookingReference || String(row.id),
+    bookingReference: row.bookingReference,
+    selectedDate: row.selectedDate,
+    paymentMethod: row.paymentMethod || 'GCash (PayMongo)',
+    customer: {
+      fullName: row.customerName || '',
+      phoneNumber: row.customerPhone || '',
+      email: row.customerEmail || '',
+      notes: row.customerNotes || '',
+    },
+    slots: Array.isArray(row.slots) ? row.slots : [],
+    totalAmount: Number(row.totalAmount) || 0,
+    paymentProofUrl: row.paymentProofUrl || '',
+    status: row.status || 'BOOKED',
+    confirmedAt: row.confirmedAt || (row.createdAt ? new Date(row.createdAt).toISOString() : ''),
+    createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : (row.confirmedAt || ''),
+    bookedAt: row.bookedAt || (row.createdAt ? new Date(row.createdAt).toISOString() : ''),
+  };
+}
+
+/**
  * Live pre-checkout / pre-submission slot availability verification.
- * Directly checks live Firestore bookings for the target date to prevent double bookings.
+ * Directly checks live Cloud SQL bookings for the target date to prevent double bookings.
  */
 export async function validateSlotsLiveAvailability(
   slots: SelectedSlot[],
@@ -127,21 +142,22 @@ export async function validateSlotsLiveAvailability(
   }
 
   try {
-    // 1. Live query of existing bookings on this reservation date (preserves all data, catches legacy records)
-    const colRef = collection(db, BOOKINGS_COLLECTION);
-    const dateQuery = query(colRef, where('selectedDate', '==', dateStr));
-    const snap = await getDocs(dateQuery);
+    const res = await fetch(`/api/sql/bookings?date=${encodeURIComponent(dateStr)}`);
+    if (!res.ok) {
+      return { isAvailable: true };
+    }
+    const data = await res.json();
+    const existingBookings = Array.isArray(data.bookings) ? data.bookings : [];
 
     const bookedSlotKeys = new Set<string>();
     const bookedRefMap = new Map<string, string>();
 
-    snap.forEach((docSnap) => {
-      const data = docSnap.data();
-      const ref = data.bookingReference || docSnap.id;
+    existingBookings.forEach((b: any) => {
+      const ref = b.bookingReference;
       if (excludeBookingRef && ref === excludeBookingRef) return;
-      if (data.status === 'CANCELLED' || data.status === 'REJECTED') return;
+      if (b.status === 'CANCELLED' || b.status === 'REJECTED') return;
 
-      (data.slots || []).forEach((s: any) => {
+      (b.slots || []).forEach((s: any) => {
         const cId = (s.courtId || 'court-1').toLowerCase();
         const tLabel = s.timeLabel || '';
         const match = tLabel.match(/(\d{1,2}):(\d{2})/);
@@ -157,7 +173,6 @@ export async function validateSlotsLiveAvailability(
       });
     });
 
-    // 2. Validate requested slots against existing booked slots and atomic locks
     for (const slot of slots) {
       const cId = (slot.courtId || 'court-1').toLowerCase();
       const tLabel = slot.timeLabel || '';
@@ -180,128 +195,57 @@ export async function validateSlotsLiveAvailability(
       }
     }
 
-    // Consolidated parallel reads for any remaining active slot locks
-    const remainingChecks = slots.map(async (slot) => {
-      const cId = (slot.courtId || 'court-1').toLowerCase();
-      const tLabel = slot.timeLabel || '';
-      const canonical = toCanonicalSlotLockId(slot.date || dateStr, cId, tLabel);
-      try {
-        const lockRef = doc(db, 'court_slot_locks', canonical);
-        const lockSnap = await getDoc(lockRef);
-        if (lockSnap.exists()) {
-          const lData = lockSnap.data();
-          if (lData.bookingReference !== excludeBookingRef && lData.status !== 'RELEASED') {
-            return {
-              isAvailable: false,
-              conflictingSlot: slot,
-              conflictReason: `Court slot "${slot.courtName} (${slot.timeLabel})" is already locked (#${lData.bookingReference}). Please select an open slot.`,
-            };
-          }
-        }
-      } catch {
-        // Fall back gracefully if lock document read had issues
-      }
-      return null;
-    });
-
-    const lockResults = await Promise.all(remainingChecks);
-    const firstConflict = lockResults.find((r) => r !== null && !r.isAvailable);
-    if (firstConflict) {
-      return firstConflict;
-    }
-
     return { isAvailable: true };
   } catch (err) {
-    console.warn('[MATCH&SIP] Live slot availability check warning (proceeding with atomic transaction):', err);
+    console.warn('[MATCH&SIP] Live slot availability check warning:', err);
     return { isAvailable: true };
   }
 }
 
 /**
- * Save a new confirmed court reservation to Cloud Firestore using an ATOMIC TRANSACTION.
- * Guarantees that concurrent submissions for the exact same slot will NEVER double-book!
+ * Save a new confirmed court reservation to Cloud SQL with atomic slot locks.
  */
 export async function saveBookingToFirestore(booking: ConfirmedBooking): Promise<void> {
-  const bookingRef = doc(db, BOOKINGS_COLLECTION, booking.bookingReference);
   const nowIso = new Date().toISOString();
   const confirmedAt = booking.confirmedAt || booking.createdAt || nowIso;
   const createdAt = booking.createdAt || confirmedAt;
   const bookedAt = booking.bookedAt || confirmedAt;
 
-  const bookingPayload = {
+  const payload = {
     bookingReference: booking.bookingReference,
     selectedDate: booking.selectedDate,
     paymentMethod: booking.paymentMethod || 'GCash (PayMongo)',
-    customer: {
-      fullName: booking.customer.fullName,
-      phoneNumber: booking.customer.phoneNumber,
-      email: booking.customer.email || '',
-      notes: booking.customer.notes || '',
-    },
+    customerName: booking.customer.fullName,
+    customerPhone: booking.customer.phoneNumber,
+    customerEmail: booking.customer.email || '',
+    customerNotes: booking.customer.notes || '',
     slots: booking.slots.map((s) => ({
       slotId: s.slotId,
       courtId: s.courtId,
       courtName: s.courtName,
       timeLabel: s.timeLabel,
-      date: s.date,
+      date: s.date || booking.selectedDate,
       price: s.price,
     })),
-    totalAmount: booking.totalAmount,
+    totalAmount: Number(booking.totalAmount) || 0,
     paymentProofUrl: booking.paymentProofUrl || '',
     status: booking.status || 'BOOKED',
-    confirmedAt: confirmedAt,
-    createdAt: createdAt,
-    bookedAt: bookedAt,
-    serverTimestamp: serverTimestamp(),
+    confirmedAt,
+    bookedAt,
   };
 
-  // Run atomic Firestore transaction: acquires lock on every slot and commits the booking
-  await runTransaction(db, async (transaction) => {
-    // Phase 1: Reads (all transaction reads must occur before any writes)
-    const lockEntries: { lockRef: any; lockId: string; slot: SelectedSlot }[] = [];
-
-    for (const slot of booking.slots) {
-      const lockId = toCanonicalSlotLockId(slot.date || booking.selectedDate, slot.courtId, slot.timeLabel);
-      const lockRef = doc(db, 'court_slot_locks', lockId);
-      const lockSnap = await transaction.get(lockRef);
-
-      if (lockSnap.exists()) {
-        const existingData = lockSnap.data();
-        if (
-          existingData.bookingReference &&
-          existingData.bookingReference !== booking.bookingReference &&
-          existingData.status !== 'RELEASED'
-        ) {
-          throw new Error(
-            `DOUBLE_BOOKING_PREVENTED: Slot "${slot.courtName} (${slot.timeLabel})" was just booked by another player (#${existingData.bookingReference}).`
-          );
-        }
-      }
-
-      lockEntries.push({ lockRef, lockId, slot });
-    }
-
-    // Phase 2: Writes
-    // 1. Commit slot locks
-    for (const { lockRef, lockId, slot } of lockEntries) {
-      transaction.set(lockRef, {
-        lockId,
-        bookingReference: booking.bookingReference,
-        customerName: booking.customer.fullName,
-        date: slot.date || booking.selectedDate,
-        courtId: slot.courtId,
-        courtName: slot.courtName,
-        timeLabel: slot.timeLabel,
-        status: 'BOOKED',
-        lockedAt: nowIso,
-      });
-    }
-
-    // 2. Commit the booking record
-    transaction.set(bookingRef, bookingPayload);
+  const res = await fetch('/api/sql/bookings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   });
 
-  // Automated immediate notification email to admin (danamieratan@gmail.com) via Resend
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to save booking to database.');
+  }
+
+  // Automated immediate notification email to admin via Resend
   try {
     const notifyResult = await sendAdminBookingNotification(booking);
     if (notifyResult.success) {
@@ -313,7 +257,7 @@ export async function saveBookingToFirestore(booking: ConfirmedBooking): Promise
     console.warn('[MATCH&SIP] Non-blocking admin email notification failed:', err);
   }
 
-  // Update in-memory & persistent cache immediately to prevent redundant network fetches
+  // Update in-memory & persistent cache immediately
   const existingCached = getInitialCachedBookings();
   const alreadyInCache = existingCached.some((b) => b.bookingReference === booking.bookingReference);
   if (!alreadyInCache) {
@@ -322,37 +266,22 @@ export async function saveBookingToFirestore(booking: ConfirmedBooking): Promise
 }
 
 /**
- * Delete a booking from Cloud Firestore using a single consolidated WriteBatch.
+ * Delete a booking and release its locks from Cloud SQL.
  */
 export async function deleteBookingFromFirestore(bookingId: string): Promise<void> {
   if (!bookingId) throw new Error('Missing booking ID for deletion');
   const cleanId = bookingId.trim();
-  const bookingRef = doc(db, BOOKINGS_COLLECTION, cleanId);
 
-  try {
-    const snap = await getDoc(bookingRef);
-    if (snap.exists()) {
-      const data = snap.data();
+  const res = await fetch(`/api/sql/bookings/${encodeURIComponent(cleanId)}`, {
+    method: 'DELETE',
+  });
 
-      // Consolidate deletions into a single atomic WriteBatch (drastically reduces network write operations)
-      const batch = writeBatch(db);
-      batch.delete(bookingRef);
-
-      for (const s of (data.slots || [])) {
-        const lockId = toCanonicalSlotLockId(s.date || data.selectedDate, s.courtId, s.timeLabel);
-        batch.delete(doc(db, 'court_slot_locks', lockId));
-      }
-
-      await batch.commit();
-    } else {
-      await deleteDoc(bookingRef);
-    }
-  } catch (err) {
-    console.warn('[MATCH&SIP] Batched deletion fallback:', err);
-    await deleteDoc(bookingRef);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to delete booking from database.');
   }
 
-  // Synchronously update in-memory and persistent cache to eliminate redundant reads
+  // Synchronously update in-memory and persistent cache
   if (inMemoryBookingsCache) {
     const updatedCache = inMemoryBookingsCache.filter(
       (b) => b.id !== cleanId && b.bookingReference !== cleanId
@@ -362,18 +291,7 @@ export async function deleteBookingFromFirestore(bookingId: string): Promise<voi
 }
 
 /**
- * Helper to build canonical slot ID (e.g. "court-1-0800")
- */
-function toCanonicalSlotId(courtId: string, timeLabel: string): string {
-  const match = (timeLabel || '').match(/(\d{1,2}):(\d{2})/);
-  const timeDigits = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
-  return `${courtId || 'court-1'}-${timeDigits}`;
-}
-
-/**
- * Update an existing booking in Cloud Firestore consolidating all modified fields into
- * a single atomic write batch, reducing roundtrips and write overhead.
- * Automatically synchronizes slot locks in the same atomic commit.
+ * Update an existing booking in Cloud SQL.
  */
 export async function updateBookingInFirestore(
   bookingId: string,
@@ -389,9 +307,7 @@ export async function updateBookingInFirestore(
 ): Promise<void> {
   const cleanId = (bookingId || '').trim();
   if (!cleanId) throw new Error('Missing booking ID for update');
-  const bookingRef = doc(db, BOOKINGS_COLLECTION, cleanId);
 
-  // Clean slot objects to ensure NO undefined values reach Firestore and canonical slot IDs are set
   const cleanSlots = updates.slots
     ? updates.slots.map((s) => {
         const courtId = s.courtId || 'court-1';
@@ -410,91 +326,53 @@ export async function updateBookingInFirestore(
       })
     : undefined;
 
-  // Consolidate all top-level and nested updates into a single atomic write payload
-  const nowIso = new Date().toISOString();
-  const consolidatedPayload: Record<string, any> = {
-    updatedAt: nowIso,
-  };
+  const payload: Record<string, any> = {};
+  if (updates.fullName !== undefined) payload.customerName = updates.fullName.trim();
+  if (updates.phoneNumber !== undefined) payload.customerPhone = updates.phoneNumber.trim();
+  if (updates.notes !== undefined) payload.customerNotes = (updates.notes || '').trim();
+  if (updates.selectedDate !== undefined) payload.selectedDate = updates.selectedDate.trim();
+  if (updates.status !== undefined) payload.status = updates.status;
+  if (updates.totalAmount !== undefined) payload.totalAmount = Number(updates.totalAmount) || 0;
+  if (cleanSlots !== undefined) payload.slots = cleanSlots;
 
-  if (updates.selectedDate !== undefined) consolidatedPayload.selectedDate = updates.selectedDate.trim();
-  if (updates.status !== undefined) consolidatedPayload.status = updates.status;
-  if (updates.totalAmount !== undefined) consolidatedPayload.totalAmount = Number(updates.totalAmount) || 0;
-  if (cleanSlots !== undefined) consolidatedPayload.slots = cleanSlots;
+  const res = await fetch(`/api/sql/bookings/${encodeURIComponent(cleanId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
 
-  const customerUpdates: Record<string, any> = {};
-  if (updates.fullName !== undefined) customerUpdates.fullName = updates.fullName.trim();
-  if (updates.phoneNumber !== undefined) customerUpdates.phoneNumber = updates.phoneNumber.trim();
-  if (updates.notes !== undefined) customerUpdates.notes = (updates.notes || '').trim();
-
-  if (Object.keys(customerUpdates).length > 0) {
-    consolidatedPayload.customer = customerUpdates;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to update booking in database.');
   }
 
-  try {
-    // Consolidate booking updates and slot lock state changes into a single atomic WriteBatch
-    const batch = writeBatch(db);
-    batch.set(bookingRef, consolidatedPayload, { merge: true });
-
-    // If booking was cancelled or rejected, release locks in the same write batch
-    if (updates.status === 'CANCELLED' || updates.status === 'REJECTED') {
-      if (cleanSlots && cleanSlots.length > 0) {
-        for (const s of cleanSlots) {
-          const lockId = toCanonicalSlotLockId(s.date || updates.selectedDate || '', s.courtId, s.timeLabel);
-          batch.delete(doc(db, 'court_slot_locks', lockId));
-        }
-      }
-    } else if (cleanSlots && cleanSlots.length > 0) {
-      // Synchronize slot locks atomically in the same batch
-      for (const s of cleanSlots) {
-        const lockId = toCanonicalSlotLockId(s.date || updates.selectedDate || '', s.courtId, s.timeLabel);
-        batch.set(
-          doc(db, 'court_slot_locks', lockId),
-          {
-            lockId,
-            bookingReference: cleanId,
-            customerName: updates.fullName || 'Player',
-            date: s.date || updates.selectedDate || '',
-            courtId: s.courtId,
-            courtName: s.courtName,
-            timeLabel: s.timeLabel,
-            status: updates.status || 'BOOKED',
-            lockedAt: nowIso,
+  // Update local cache
+  const currentCache = getInitialCachedBookings();
+  if (currentCache.length > 0) {
+    const updatedCache = currentCache.map((b) => {
+      if (b.id === cleanId || b.bookingReference === cleanId) {
+        return {
+          ...b,
+          ...(updates.selectedDate ? { selectedDate: updates.selectedDate } : {}),
+          ...(updates.status ? { status: updates.status } : {}),
+          ...(updates.totalAmount !== undefined ? { totalAmount: Number(updates.totalAmount) } : {}),
+          customer: {
+            ...b.customer,
+            ...(updates.fullName ? { fullName: updates.fullName } : {}),
+            ...(updates.phoneNumber ? { phoneNumber: updates.phoneNumber } : {}),
+            ...(updates.notes !== undefined ? { notes: updates.notes } : {}),
           },
-          { merge: true }
-        );
+          slots: cleanSlots || b.slots,
+        };
       }
-    }
-
-    await batch.commit();
-
-    // Immediately update local cache to keep client UI responsive without re-fetching
-    const currentCache = getInitialCachedBookings();
-    if (currentCache.length > 0) {
-      const updatedCache = currentCache.map((b) => {
-        if (b.id === cleanId || b.bookingReference === cleanId) {
-          return {
-            ...b,
-            ...consolidatedPayload,
-            customer: {
-              ...b.customer,
-              ...(customerUpdates || {}),
-            },
-            slots: cleanSlots || b.slots,
-          };
-        }
-        return b;
-      });
-      setCachedBookings(updatedCache);
-    }
-  } catch (err) {
-    console.error('[MATCH&SIP] Consolidated update error:', err);
-    handleFirestoreError(err, OperationType.UPDATE, `${BOOKINGS_COLLECTION}/${cleanId}`);
+      return b;
+    });
+    setCachedBookings(updatedCache);
   }
 }
 
 /**
- * Consolidate updates across multiple bookings into a SINGLE atomic WriteBatch.
- * Substantially reduces Firestore write operations and guarantees all-or-nothing execution.
+ * Consolidate updates across multiple bookings into Cloud SQL.
  */
 export async function batchUpdateBookingsInFirestore(
   bookingUpdates: Array<{
@@ -512,89 +390,13 @@ export async function batchUpdateBookingsInFirestore(
 ): Promise<void> {
   if (!bookingUpdates || bookingUpdates.length === 0) return;
 
-  const batch = writeBatch(db);
-  const nowIso = new Date().toISOString();
-
   for (const { bookingId, updates } of bookingUpdates) {
-    const cleanId = (bookingId || '').trim();
-    if (!cleanId) continue;
-    const bookingRef = doc(db, BOOKINGS_COLLECTION, cleanId);
-
-    const cleanSlots = updates.slots
-      ? updates.slots.map((s) => ({
-          slotId: toCanonicalSlotId(s.courtId || 'court-1', s.timeLabel || '08:00 - 09:00'),
-          courtId: s.courtId || 'court-1',
-          courtName: s.courtName || (s.courtId === 'court-2' ? 'Court 02' : 'Court 01'),
-          timeLabel: s.timeLabel || '08:00 - 09:00',
-          date: s.date || updates.selectedDate || '',
-          price: Number(s.price) || 0,
-        }))
-      : undefined;
-
-    const consolidatedPayload: Record<string, any> = {
-      updatedAt: nowIso,
-    };
-
-    if (updates.selectedDate !== undefined) consolidatedPayload.selectedDate = updates.selectedDate.trim();
-    if (updates.status !== undefined) consolidatedPayload.status = updates.status;
-    if (updates.totalAmount !== undefined) consolidatedPayload.totalAmount = Number(updates.totalAmount) || 0;
-    if (cleanSlots !== undefined) consolidatedPayload.slots = cleanSlots;
-
-    const customerUpdates: Record<string, any> = {};
-    if (updates.fullName !== undefined) customerUpdates.fullName = updates.fullName.trim();
-    if (updates.phoneNumber !== undefined) customerUpdates.phoneNumber = updates.phoneNumber.trim();
-    if (updates.notes !== undefined) customerUpdates.notes = (updates.notes || '').trim();
-
-    if (Object.keys(customerUpdates).length > 0) {
-      consolidatedPayload.customer = customerUpdates;
-    }
-
-    batch.set(bookingRef, consolidatedPayload, { merge: true });
-
-    if (updates.status === 'CANCELLED' || updates.status === 'REJECTED') {
-      if (cleanSlots && cleanSlots.length > 0) {
-        for (const s of cleanSlots) {
-          const lockId = toCanonicalSlotLockId(s.date || updates.selectedDate || '', s.courtId, s.timeLabel);
-          batch.delete(doc(db, 'court_slot_locks', lockId));
-        }
-      }
-    }
-  }
-
-  try {
-    await batch.commit();
-
-    // Sync cache
-    const currentCache = getInitialCachedBookings();
-    if (currentCache.length > 0) {
-      const updateMap = new Map(bookingUpdates.map((u) => [u.bookingId.trim(), u.updates]));
-      const updatedCache = currentCache.map((b) => {
-        const u = updateMap.get(b.bookingReference) || updateMap.get(b.id || '');
-        if (u) {
-          return {
-            ...b,
-            ...u,
-            customer: {
-              ...b.customer,
-              ...(u.fullName ? { fullName: u.fullName } : {}),
-              ...(u.phoneNumber ? { phoneNumber: u.phoneNumber } : {}),
-              ...(u.notes !== undefined ? { notes: u.notes } : {}),
-            },
-          };
-        }
-        return b;
-      });
-      setCachedBookings(updatedCache);
-    }
-  } catch (err) {
-    console.error('[MATCH&SIP] Batch update commit error:', err);
-    handleFirestoreError(err, OperationType.WRITE, BOOKINGS_COLLECTION);
+    await updateBookingInFirestore(bookingId, updates);
   }
 }
 
 /**
- * Real-time subscription to all court reservations in Cloud Firestore.
- * Automatically receives real-time updates whenever a new booking is confirmed.
+ * Real-time subscription to court reservations in Cloud SQL via periodic polling and instant cache delivery.
  */
 export function subscribeToBookings(
   onBookingsUpdated: (bookings: ConfirmedBooking[]) => void,
@@ -607,59 +409,36 @@ export function subscribeToBookings(
     onBookingsUpdated(cached);
   }
 
-  // 2. Query optimization: limit to active/recent reservations (default 250) instead of unbounded collection
   const maxLimit = options?.maxLimit ?? 250;
-  const colRef = collection(db, BOOKINGS_COLLECTION);
-  const q = query(colRef, limit(maxLimit));
+  let isMounted = true;
 
-  const unsubscribe = onSnapshot(
-    q,
-    (snapshot) => {
-      const items: ConfirmedBooking[] = [];
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        let fallbackTimestamp = '';
-        if (data.serverTimestamp) {
-          try {
-            fallbackTimestamp = typeof data.serverTimestamp.toDate === 'function'
-              ? data.serverTimestamp.toDate().toISOString()
-              : '';
-          } catch {
-            fallbackTimestamp = '';
-          }
-        }
-        const confirmedAt = data.confirmedAt || data.createdAt || data.bookedAt || fallbackTimestamp || '';
+  const fetchBookings = async () => {
+    try {
+      const res = await fetch(`/api/sql/bookings?limit=${maxLimit}`);
+      if (!res.ok) throw new Error('Failed to fetch bookings from Cloud SQL');
+      const data = await res.json();
+      if (!isMounted) return;
 
-        items.push({
-          id: docSnap.id,
-          bookingReference: data.bookingReference || docSnap.id,
-          selectedDate: data.selectedDate,
-          paymentMethod: data.paymentMethod || 'InstaPay QR',
-          customer: {
-            fullName: data.customer?.fullName || '',
-            phoneNumber: data.customer?.phoneNumber || '',
-            email: data.customer?.email || '',
-            notes: data.customer?.notes || '',
-          },
-          slots: Array.isArray(data.slots) ? data.slots : [],
-          totalAmount: Number(data.totalAmount) || 0,
-          paymentProofUrl: data.paymentProofUrl || '',
-          status: data.status || 'VERIFIED',
-          confirmedAt: confirmedAt,
-          createdAt: data.createdAt || confirmedAt,
-          bookedAt: data.bookedAt || confirmedAt,
-        });
-      });
+      const items: ConfirmedBooking[] = (data.bookings || []).map(mapSqlRowToBooking);
       setCachedBookings(items);
       onBookingsUpdated(items);
-    },
-    (err) => {
-      console.warn('Firestore subscription fallback:', err);
+    } catch (err: any) {
+      if (!isMounted) return;
+      console.warn('Cloud SQL bookings fetch notice:', err);
       if (onError) onError(err);
     }
-  );
+  };
 
-  return unsubscribe;
+  // Initial fetch
+  fetchBookings();
+
+  // Poll every 4 seconds to catch newly confirmed bookings in real-time
+  const intervalId = setInterval(fetchBookings, 4000);
+
+  return () => {
+    isMounted = false;
+    clearInterval(intervalId);
+  };
 }
 
 /**
@@ -723,21 +502,23 @@ export function subscribeToSingleBooking(
   bookingReference: string,
   onUpdate: (booking: ConfirmedBooking | null) => void
 ): () => void {
-  const bookingRef = doc(db, BOOKINGS_COLLECTION, bookingReference);
-  return onSnapshot(
-    bookingRef,
-    (snap) => {
-      if (!snap.exists()) {
-        onUpdate(null);
+  let isMounted = true;
+
+  const pollStatus = async () => {
+    try {
+      const res = await fetch(`/api/payment/status/${encodeURIComponent(bookingReference)}`);
+      if (!res.ok) {
+        if (res.status === 404 && isMounted) onUpdate(null);
         return;
       }
-      const data = snap.data();
-      const confirmedAt = data.confirmedAt || data.createdAt || data.bookedAt || '';
+      const data = await res.json();
+      if (!isMounted) return;
+
       onUpdate({
-        id: snap.id,
-        bookingReference: data.bookingReference || snap.id,
+        id: bookingReference,
+        bookingReference,
         selectedDate: data.selectedDate,
-        paymentMethod: data.paymentMethod || 'GCash (PayMongo)',
+        paymentMethod: 'GCash (PayMongo)',
         customer: {
           fullName: data.customer?.fullName || '',
           phoneNumber: data.customer?.phoneNumber || '',
@@ -746,16 +527,23 @@ export function subscribeToSingleBooking(
         },
         slots: Array.isArray(data.slots) ? data.slots : [],
         totalAmount: Number(data.totalAmount) || 0,
-        paymentProofUrl: data.paymentProofUrl || '',
+        paymentProofUrl: '',
         status: data.status || 'PENDING',
-        confirmedAt: confirmedAt,
-        createdAt: data.createdAt || confirmedAt,
-        paidAt: data.paidAt || '',
-        paymentId: data.paymentId || '',
+        confirmedAt: '',
+        createdAt: '',
+        paidAt: data.isBooked ? new Date().toISOString() : '',
+        paymentId: '',
       });
-    },
-    (err) => {
-      console.warn('Single booking subscription error:', err);
+    } catch (err) {
+      console.warn('Single booking status poll notice:', err);
     }
-  );
+  };
+
+  pollStatus();
+  const intervalId = setInterval(pollStatus, 2500);
+
+  return () => {
+    isMounted = false;
+    clearInterval(intervalId);
+  };
 }
