@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { WifiOff, Wifi, AlertTriangle } from 'lucide-react';
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
 import { HomePage } from './pages/HomePage';
@@ -12,14 +13,19 @@ import { TimeSlot, SelectedSlot, ConfirmedBooking } from './types';
 import { 
   subscribeToBookings, 
   saveBookingToFirestore, 
-  getInitialCachedBookings 
+  getInitialCachedBookings,
+  validateSlotsLiveAvailability 
 } from './services/bookingService';
 import { getTodayDateString } from './utils/dateUtils';
+import { useNetworkStatus } from './utils/useNetworkStatus';
 
 // Lazy-loaded routes & modals for bundle code-splitting and faster initial page load
 const BookingsPage = lazy(() => import('./pages/BookingsPage').then((m) => ({ default: m.BookingsPage })));
 const BookingSuccessModal = lazy(() => import('./components/BookingSuccessModal').then((m) => ({ default: m.BookingSuccessModal })));
 const ReservationsModal = lazy(() => import('./components/ReservationsModal').then((m) => ({ default: m.ReservationsModal })));
+
+const SELECTED_SLOTS_STORAGE_KEY = 'matchsip_selected_slots';
+const SELECTED_DATE_STORAGE_KEY = 'matchsip_selected_date';
 
 // Lightweight Route Loading Spinner
 const RouteLoadingFallback = () => (
@@ -33,12 +39,39 @@ export default function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const isBookingsPage = location.pathname === '/bookings';
-  const [selectedDate, setSelectedDate] = useState<string>(() => getTodayDateString());
-  const [selectedSlots, setSelectedSlots] = useState<SelectedSlot[]>([]);
+
+  // Network drop tracking & offline fallbacks
+  const { isOnline, wasOffline } = useNetworkStatus();
+
+  // Restore cached selected date if valid
+  const [selectedDate, setSelectedDate] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(SELECTED_DATE_STORAGE_KEY);
+      if (saved && /^\d{4}-\d{2}-\d{2}$/.test(saved)) {
+        return saved;
+      }
+    } catch {}
+    return getTodayDateString();
+  });
+
+  // Restore cached selected slots so network drops or reloads never lose user's chosen court slots
+  const [selectedSlots, setSelectedSlots] = useState<SelectedSlot[]>(() => {
+    try {
+      const raw = localStorage.getItem(SELECTED_SLOTS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.slots) && (Date.now() - (parsed.savedAt || 0) < 12 * 60 * 60 * 1000)) {
+          return parsed.slots;
+        }
+      }
+    } catch {}
+    return [];
+  });
+
   const [confirmedBooking, setConfirmedBooking] = useState<ConfirmedBooking | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Firestore Real-time Persistence State (instant cache initialization eliminates loading flash)
+  // Cloud SQL Real-time Persistence State
   const [persistedBookings, setPersistedBookings] = useState<ConfirmedBooking[]>(() => {
     return getInitialCachedBookings();
   });
@@ -47,7 +80,24 @@ export default function App() {
   });
   const [isReservationsModalOpen, setIsReservationsModalOpen] = useState<boolean>(false);
 
-  // Everyday real-time sync: when midnight hits, dynamically advance current day in real time
+  // Sync selected date to local storage
+  useEffect(() => {
+    try {
+      localStorage.setItem(SELECTED_DATE_STORAGE_KEY, selectedDate);
+    } catch {}
+  }, [selectedDate]);
+
+  // Sync selected slots to local storage so connection drops don't lose slots
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SELECTED_SLOTS_STORAGE_KEY,
+        JSON.stringify({ slots: selectedSlots, savedAt: Date.now() })
+      );
+    } catch {}
+  }, [selectedSlots]);
+
+  // Everyday real-time sync: when midnight hits, dynamically advance current day
   useEffect(() => {
     let lastKnownToday = getTodayDateString();
     const interval = setInterval(() => {
@@ -60,14 +110,39 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage((curr) => (curr === msg ? null : curr));
-    }, 3200);
-  };
+    }, 3500);
+  }, []);
 
-  // Real-time synchronization with Cloud Firestore
+  // When returning online after a network drop, re-validate selected slots against live Cloud SQL
+  useEffect(() => {
+    if (wasOffline && isOnline) {
+      showToast('⚡ Back online! Re-validating slot availability with Cloud SQL...');
+      if (selectedSlots.length > 0) {
+        validateSlotsLiveAvailability(selectedSlots, selectedDate)
+          .then((check) => {
+            if (!check.isAvailable) {
+              showToast(`⚠️ Offline conflict: ${check.conflictReason}`);
+              if (check.conflictingSlot) {
+                setSelectedSlots((prev) =>
+                  prev.filter((s) => s.slotId !== check.conflictingSlot?.slotId)
+                );
+              }
+            } else {
+              showToast('✓ All your selected court slots remain reserved and open!');
+            }
+          })
+          .catch((err) => {
+            console.warn('Re-validation warning:', err);
+          });
+      }
+    }
+  }, [wasOffline, isOnline, selectedDate, selectedSlots, showToast]);
+
+  // Real-time synchronization with Cloud SQL
   useEffect(() => {
     const unsubscribe = subscribeToBookings(
       (bookings) => {
@@ -75,7 +150,7 @@ export default function App() {
         setIsLoadingBookings(false);
       },
       (error) => {
-        console.warn('Real-time database sync notice:', error);
+        console.warn('Cloud SQL database sync notice:', error);
         setIsLoadingBookings(false);
       }
     );
@@ -87,7 +162,7 @@ export default function App() {
     };
   }, []);
 
-  // Concurrency guard: if someone else books a slot that is currently picked by this user, automatically release it
+  // Concurrency guard: if another player books a slot that is currently picked by this user, automatically release it
   useEffect(() => {
     if (selectedSlots.length === 0 || persistedBookings.length === 0) return;
 
@@ -119,7 +194,7 @@ export default function App() {
       );
       showToast(`${conflicted.length} slot(s) were just reserved by another player.`);
     }
-  }, [persistedBookings, selectedDate, selectedSlots]);
+  }, [persistedBookings, selectedDate, selectedSlots, showToast]);
 
   const handleToggleSlot = useCallback((slot: TimeSlot, dateStr: string) => {
     const formattedRange = `${slot.startTime}-${slot.endTime}`;
@@ -129,7 +204,7 @@ export default function App() {
         showToast(`Removed ${slot.courtName} (${formattedRange})`);
         return prev.filter((s) => !(s.slotId === slot.id && s.date === dateStr));
       } else {
-        showToast(`Added ${slot.courtName} (${formattedRange}) to reservation`);
+        showToast(`Added ${slot.courtName} (${formattedRange})`);
         return [
           ...prev,
           {
@@ -143,12 +218,15 @@ export default function App() {
         ];
       }
     });
-  }, []);
+  }, [showToast]);
 
   const handleClearSlots = useCallback(() => {
     setSelectedSlots([]);
+    try {
+      localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
+    } catch {}
     showToast('Cleared all selected court slots');
-  }, []);
+  }, [showToast]);
 
   const handlePlayTodayClick = useCallback(() => {
     navigate('/');
@@ -162,16 +240,19 @@ export default function App() {
 
   const handleBookingComplete = useCallback(async (booking: ConfirmedBooking) => {
     try {
-      // 1. Atomic Firestore transaction: verifies no slots are taken and commits
+      // 1. Atomic commit to Cloud SQL with court slot locks
       await saveBookingToFirestore(booking);
 
-      // 2. On atomic commit success: update state and show success
+      // 2. On atomic commit success: update state, clear cached selection and draft
       setPersistedBookings((prev) => [booking, ...prev.filter((b) => b.bookingReference !== booking.bookingReference)]);
       setConfirmedBooking(booking);
       setSelectedSlots([]);
-      showToast(`Reservation #${booking.bookingReference} confirmed & saved!`);
+      try {
+        localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
+      } catch {}
+      showToast(`Reservation #${booking.bookingReference} confirmed!`);
     } catch (error: any) {
-      console.error('Error saving to Cloud Firestore:', error);
+      console.error('Error saving to Cloud SQL:', error);
       if (error?.message && error.message.includes('DOUBLE_BOOKING_PREVENTED')) {
         showToast('⚠️ Slot conflict: This court hour was just booked by another player.');
         throw error;
@@ -180,12 +261,23 @@ export default function App() {
       setPersistedBookings((prev) => [booking, ...prev.filter((b) => b.bookingReference !== booking.bookingReference)]);
       setConfirmedBooking(booking);
       setSelectedSlots([]);
-      showToast(`Reservation #${booking.bookingReference} saved locally!`);
+      try {
+        localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
+      } catch {}
+      showToast(`Reservation #${booking.bookingReference} preserved locally!`);
     }
-  }, []);
+  }, [showToast]);
 
   return (
     <div className="min-h-screen bg-[#5E2CB2] text-[#FFFFFF] flex flex-col selection:bg-[#00C6FF] selection:text-black">
+      {/* Offline Status Bar when connection drops */}
+      {!isOnline && (
+        <div className="bg-amber-500 text-black px-4 py-2.5 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 border-b border-amber-600 shadow-md z-50 sticky top-0 animate-in slide-in-from-top duration-200">
+          <WifiOff className="h-4 w-4 shrink-0" />
+          <span>Offline Mode Active • Your selected slots and inputs are safely saved on this device</span>
+        </div>
+      )}
+
       {/* Top Header */}
       {!isBookingsPage && location.pathname !== '/checkout/gcash-pay' && (
         <Header
@@ -197,7 +289,7 @@ export default function App() {
       )}
 
       {/* Main Routed Content with Code-Splitting Suspense */}
-      <main className="flex-1 flex flex-col">
+      <main className="flex-1 flex flex-col pb-12 lg:pb-0">
         <Suspense fallback={<RouteLoadingFallback />}>
           <Routes>
             <Route
@@ -243,7 +335,7 @@ export default function App() {
         />
       </Suspense>
 
-      {/* Persistent Cloud Reservations Modal */}
+      {/* Persistent Reservations Modal */}
       <Suspense fallback={null}>
         <ReservationsModal
           isOpen={isReservationsModalOpen}
@@ -255,9 +347,9 @@ export default function App() {
 
       {/* Floating Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl border border-[#00C6FF]/60 bg-[#5E2CB2] px-4 py-3 text-xs font-semibold text-[#FFFFFF] shadow-2xl shadow-[#00C6FF]/30 backdrop-blur-md animate-in fade-in slide-in-from-bottom-3 duration-200">
-          <span className="h-2 w-2 rounded-full bg-[#00C6FF] animate-ping" />
-          <span>{toastMessage}</span>
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl border border-[#00C6FF]/60 bg-[#5E2CB2] px-4 py-3 text-xs font-semibold text-[#FFFFFF] shadow-2xl shadow-[#00C6FF]/30 backdrop-blur-md animate-in fade-in slide-in-from-bottom-3 duration-200 max-w-[90vw]">
+          <span className="h-2 w-2 rounded-full bg-[#00C6FF] animate-ping shrink-0" />
+          <span className="leading-snug">{toastMessage}</span>
         </div>
       )}
     </div>

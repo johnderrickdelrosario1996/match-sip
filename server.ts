@@ -15,6 +15,11 @@ import {
   deleteBookingByReference,
   updateBookingFields,
 } from './src/db/bookings.ts';
+import {
+  bookingsReadLimiter,
+  bookingsWriteLimiter,
+  duplicateBookingProtection,
+} from './src/middleware/rateLimiter.ts';
 
 dotenv.config({ override: true });
 
@@ -318,7 +323,7 @@ app.post('/api/users/sync', requireAuth, async (req: AuthRequest, res) => {
 /**
  * Cloud SQL Bookings API
  */
-app.get('/api/sql/bookings', async (req, res) => {
+app.get('/api/sql/bookings', bookingsReadLimiter(120, 60000), async (req, res) => {
   try {
     const limitCount = req.query.limit ? Number(req.query.limit) : 250;
     const date = req.query.date as string | undefined;
@@ -335,7 +340,7 @@ app.get('/api/sql/bookings', async (req, res) => {
   }
 });
 
-app.get('/api/sql/bookings/:reference', async (req, res) => {
+app.get('/api/sql/bookings/:reference', bookingsReadLimiter(120, 60000), async (req, res) => {
   try {
     const { reference } = req.params;
     const booking = await getBookingByReference(reference);
@@ -349,22 +354,27 @@ app.get('/api/sql/bookings/:reference', async (req, res) => {
   }
 });
 
-app.post('/api/sql/bookings', async (req, res) => {
-  try {
-    const bookingInput = req.body;
-    if (!bookingInput || !bookingInput.bookingReference || !bookingInput.selectedDate) {
-      return res.status(400).json({ error: 'bookingReference and selectedDate are required' });
+app.post(
+  '/api/sql/bookings',
+  bookingsWriteLimiter(20, 60000),
+  duplicateBookingProtection,
+  async (req, res) => {
+    try {
+      const bookingInput = req.body;
+      if (!bookingInput || !bookingInput.bookingReference || !bookingInput.selectedDate) {
+        return res.status(400).json({ error: 'bookingReference and selectedDate are required' });
+      }
+      const result = await saveBookingWithLocks(bookingInput);
+      res.json({ success: true, booking: result });
+    } catch (error: any) {
+      console.error('Failed to save booking to Cloud SQL:', error);
+      const isConflict = error?.message?.includes('DOUBLE_BOOKING_PREVENTED');
+      res.status(isConflict ? 409 : 500).json({ error: error.message || 'Failed to save booking' });
     }
-    const result = await saveBookingWithLocks(bookingInput);
-    res.json({ success: true, booking: result });
-  } catch (error: any) {
-    console.error('Failed to save booking to Cloud SQL:', error);
-    const isConflict = error?.message?.includes('DOUBLE_BOOKING_PREVENTED');
-    res.status(isConflict ? 409 : 500).json({ error: error.message || 'Failed to save booking' });
   }
-});
+);
 
-app.put('/api/sql/bookings/:reference', async (req, res) => {
+app.put('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), async (req, res) => {
   try {
     const { reference } = req.params;
     const updates = req.body;
@@ -379,7 +389,7 @@ app.put('/api/sql/bookings/:reference', async (req, res) => {
   }
 });
 
-app.delete('/api/sql/bookings/:reference', async (req, res) => {
+app.delete('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), async (req, res) => {
   try {
     const { reference } = req.params;
     const deleted = await deleteBookingByReference(reference);
@@ -395,7 +405,11 @@ app.delete('/api/sql/bookings/:reference', async (req, res) => {
  * Integrates PayMongo Checkout Session or Source when user clicks BOOK RESERVATION.
  * Generates GCash checkout URL & dynamic QR code, and holds the booking in Firestore.
  */
-app.post('/api/create-checkout', async (req, res) => {
+app.post(
+  '/api/create-checkout',
+  bookingsWriteLimiter(20, 60000),
+  duplicateBookingProtection,
+  async (req, res) => {
   try {
     const { booking } = req.body;
     if (!booking || !booking.bookingReference || !booking.totalAmount) {

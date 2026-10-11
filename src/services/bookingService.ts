@@ -46,7 +46,14 @@ export function setCachedBookings(bookings: ConfirmedBooking[]): void {
   lastCacheTimestamp = Date.now();
   try {
     if (typeof window !== 'undefined') {
-      localStorage.setItem(LOCAL_STORAGE_CACHE_KEY, JSON.stringify(bookings));
+      // Omit data: URLs from localStorage to prevent QuotaExceededError while retaining metadata
+      const safeForLocalStorage = bookings.map((b) => {
+        if (b.paymentProofUrl && b.paymentProofUrl.startsWith('data:')) {
+          return { ...b, paymentProofUrl: '' };
+        }
+        return b;
+      });
+      localStorage.setItem(LOCAL_STORAGE_CACHE_KEY, JSON.stringify(safeForLocalStorage));
     }
   } catch (err) {
     // Quota exceeded or private browsing

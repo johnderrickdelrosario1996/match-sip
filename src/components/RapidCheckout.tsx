@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, 
   CheckCircle2, 
@@ -48,12 +48,43 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
   onBookingComplete,
   onNavigateToMatrix,
 }) => {
-  const [fullName, setFullName] = useState('');
-  const [phoneNumber, setPhoneNumber] = useState('');
+  // Restore draft inputs from local storage so network flickers don't lose typed data
+  const [fullName, setFullName] = useState<string>(() => {
+    try {
+      const draft = localStorage.getItem('matchsip_checkout_draft');
+      if (draft) {
+        const parsed = JSON.parse(draft);
+        return parsed.fullName || '';
+      }
+    } catch {}
+    return '';
+  });
+
+  const [phoneNumber, setPhoneNumber] = useState<string>(() => {
+    try {
+      const draft = localStorage.getItem('matchsip_checkout_draft');
+      if (draft) {
+        const parsed = JSON.parse(draft);
+        return parsed.phoneNumber || '';
+      }
+    } catch {}
+    return '';
+  });
+
   const [safetyAgreed, setSafetyAgreed] = useState(false);
   const [showSafetyModal, setShowSafetyModal] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showReceiptPreviewModal, setShowReceiptPreviewModal] = useState(false);
+
+  // Sync draft to local storage so connection drops keep user input safe
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'matchsip_checkout_draft',
+        JSON.stringify({ fullName, phoneNumber })
+      );
+    } catch {}
+  }, [fullName, phoneNumber]);
 
   // Payment receipt states
   const [proofImage, setProofImage] = useState<string | null>(null);
@@ -68,6 +99,26 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isNetworkFailure, setIsNetworkFailure] = useState(false);
+
+  // Listen to network online recovery
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsNetworkFailure(false);
+      if (errorMessage && errorMessage.includes('offline')) {
+        setErrorMessage(null);
+      }
+    };
+    const handleOffline = () => {
+      setIsNetworkFailure(true);
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [errorMessage]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -237,6 +288,15 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
       return;
     }
 
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setIsNetworkFailure(true);
+      setErrorMessage(
+        'You appear to be offline. Your selected slots and form details are safely saved on this device. Tap "Retry Reservation" once your network reconnects.'
+      );
+      setIsSubmitting(false);
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -285,7 +345,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
         },
         slots: selectedSlots,
         totalAmount: totalPrice,
-        paymentProofUrl: finalProofUrl, // Firebase Storage download URL stored inside Cloud Firestore
+        paymentProofUrl: finalProofUrl,
         confirmedAt: nowIso,
         createdAt: nowIso,
         bookedAt: nowIso,
@@ -295,18 +355,37 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
 
       await onBookingComplete(newBooking);
 
-      // Reset form on success
+      // Reset form & cached draft on success
       setFullName('');
       setPhoneNumber('');
       setSafetyAgreed(false);
       removeProof();
+      setIsNetworkFailure(false);
+      try {
+        localStorage.removeItem('matchsip_checkout_draft');
+      } catch {}
     } catch (err: unknown) {
       console.error('Submission error:', err);
-      setErrorMessage(
-        err instanceof Error 
-          ? err.message 
-          : 'Could not complete reservation. Please try again.'
-      );
+      const isNet =
+        (typeof navigator !== 'undefined' && !navigator.onLine) ||
+        (err instanceof Error &&
+          (err.message.includes('fetch') ||
+            err.message.includes('network') ||
+            err.message.includes('Network') ||
+            err.message.includes('Failed to fetch')));
+      if (isNet) {
+        setIsNetworkFailure(true);
+        setErrorMessage(
+          'Connection flickered during checkout. Don’t worry! Your slots and details are saved on your phone. Tap "Retry Reservation" to confirm.'
+        );
+      } else {
+        setIsNetworkFailure(false);
+        setErrorMessage(
+          err instanceof Error 
+            ? err.message 
+            : 'Could not complete reservation. Please try again.'
+        );
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -408,7 +487,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                   onChange={(e) => setFullName(e.target.value)}
                   placeholder="Your name"
                   required
-                  className={`w-full rounded-xl border px-4 py-3.5 text-sm font-medium text-[#FFFFFF] placeholder-[#B3A2DB]/70 transition-all focus:outline-none focus:ring-1 focus:ring-[#00C6FF] ${
+                  className={`w-full rounded-xl border px-4 py-3.5 sm:py-4 text-base sm:text-sm font-medium text-[#FFFFFF] placeholder-[#B3A2DB]/70 transition-all focus:outline-none focus:ring-1 focus:ring-[#00C6FF] min-h-[50px] ${
                     isNameFilled
                       ? 'border-[#00C6FF]/70 bg-[#5E2CB2]'
                       : 'border-[#B3A2DB]/50 bg-[#5E2CB2]'
@@ -419,7 +498,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
               {/* Phone number input with +63 prefix */}
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
-                  <div className="flex h-12 items-center justify-center rounded-xl border border-[#B3A2DB]/50 bg-[#5E2CB2] px-4 text-sm font-bold text-[#FFFFFF]">
+                  <div className="flex h-12.5 sm:h-13 items-center justify-center rounded-xl border border-[#B3A2DB]/50 bg-[#5E2CB2] px-4 text-base sm:text-sm font-bold text-[#FFFFFF] min-h-[50px]">
                     +63
                   </div>
                   <div className="relative flex-1">
@@ -436,7 +515,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                       pattern="[0-9]{10}"
                       placeholder="9XX XXX XXXX"
                       required
-                      className={`w-full rounded-xl border px-4 py-3.5 pr-14 text-sm font-mono font-medium tracking-wider text-[#FFFFFF] placeholder-[#B3A2DB]/70 transition-all focus:outline-none focus:ring-1 focus:ring-[#00C6FF] ${
+                      className={`w-full rounded-xl border px-4 py-3.5 sm:py-4 pr-14 text-base sm:text-sm font-mono font-medium tracking-wider text-[#FFFFFF] placeholder-[#B3A2DB]/70 transition-all focus:outline-none focus:ring-1 focus:ring-[#00C6FF] min-h-[50px] ${
                         isPhoneFilled
                           ? 'border-[#00C6FF]/80 bg-[#5E2CB2] shadow-[0_0_12px_rgba(0,198,255,0.15)]'
                           : 'border-[#B3A2DB]/50 bg-[#5E2CB2]'
@@ -728,11 +807,24 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                 </button>
               </div>
 
-              {/* Error notice if any */}
+              {/* Error notice & Offline Fallback Action */}
               {errorMessage && (
-                <div className="flex items-center gap-2 rounded-xl bg-red-950/80 border border-red-500/60 px-4 py-2.5 text-xs text-red-200">
-                  <AlertCircle className="h-4 w-4 text-red-400 shrink-0" />
-                  <span>{errorMessage}</span>
+                <div className="flex flex-col gap-2.5 rounded-xl bg-red-950/80 border border-red-500/60 p-3.5 text-xs text-red-200">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+                    <span className="leading-relaxed flex-1">{errorMessage}</span>
+                  </div>
+                  {isNetworkFailure && (
+                    <button
+                      type="button"
+                      onClick={handleSubmit}
+                      disabled={isSubmitting || !isFormValid}
+                      className="mt-1 w-full rounded-xl bg-[#00C6FF] py-3 px-4 text-center text-xs font-black uppercase tracking-wider text-black shadow-md hover:bg-[#00C6FF]/90 active:scale-95 cursor-pointer flex items-center justify-center gap-2 min-h-[46px]"
+                    >
+                      <RefreshCw className={`h-4 w-4 ${isSubmitting ? 'animate-spin' : ''}`} />
+                      <span>Retry Reservation Now</span>
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -742,13 +834,20 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                   type="submit"
                   id="book-reservation-btn"
                   disabled={!isFormValid}
-                  className={`w-full rounded-xl py-4 text-center text-xs sm:text-sm font-black uppercase tracking-wider transition-all ${
+                  className={`w-full rounded-xl py-4 sm:py-4.5 text-center text-xs sm:text-sm font-black uppercase tracking-wider transition-all min-h-[52px] sm:min-h-[56px] flex items-center justify-center gap-2 ${
                     isFormValid
                       ? 'bg-[#00C6FF] text-black shadow-lg shadow-[#00C6FF]/30 hover:bg-[#00C6FF]/90 hover:scale-[1.01] active:scale-95 cursor-pointer'
                       : 'bg-[#B3A2DB]/20 text-[#FFFFFF]/40 cursor-not-allowed border border-[#B3A2DB]/20 shadow-none'
                   }`}
                 >
-                  {isSubmitting ? 'SAVING TO CLOUD FIRESTORE...' : 'BOOK RESERVATION'}
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                      <span>CONFIRMING RESERVATION...</span>
+                    </>
+                  ) : (
+                    <span>BOOK RESERVATION</span>
+                  )}
                 </button>
 
                 <p className="mt-2 text-center text-[11px] text-[#B3A2DB]">

@@ -40,7 +40,7 @@ export const BookingSuccessModal: React.FC<BookingSuccessModalProps> = ({ bookin
             See You on the Kitchen!
           </h3>
           <p className="text-xs sm:text-sm text-[#B3A2DB] mt-1">
-            Your court has been secured. An SMS confirmation and digital pass have been dispatched.
+            Your court has been secured. We look forward to seeing you at MATCH &amp; SIP!
           </p>
         </div>
 
