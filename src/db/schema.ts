@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, serial, text, varchar, integer, timestamp, jsonb } from 'drizzle-orm/pg-core';
 
 // Users table (linked to Firebase Auth UID)
 export const users = pgTable('users', {
@@ -42,3 +42,13 @@ export const courtSlotLocks = pgTable('court_slot_locks', {
   lockedAt: text('locked_at').default(''),
   createdAt: timestamp('created_at').defaultNow(),
 });
+
+// Visitor Analytics & Security Audit Logs Table (48-hour rolling window)
+export const visitorAnalytics = pgTable('visitor_analytics', {
+  id: serial('id').primaryKey(),
+  ipAddress: varchar('ip_address', { length: 255 }).notNull(),
+  action: text('action').notNull(),
+  userAgent: text('user_agent').default(''),
+  timestamp: timestamp('timestamp').defaultNow(),
+});
+

@@ -17,6 +17,7 @@ import qrCodeImg from '../assets/images/INSTAPAY QR CODE.jpg';
 import paddleUpImg from '../assets/images/Paddleup.jpg';
 import { uploadReceiptToFirebaseStorage, compressImageToBase64, validateReceiptFile } from '../services/storageService';
 import { validateSlotsLiveAvailability } from '../services/bookingService';
+import { getTodayDateString } from '../utils/dateUtils';
 
 interface RapidCheckoutProps {
   selectedDate: string;
@@ -40,6 +41,8 @@ const COURT_SAFETY_RULES = [
   { num: '12', text: 'Report all accidents and hazards immediately to court staff.' },
   { num: '13', text: 'No smoking / vaping: Smoking, vaping, or using e-cigarettes is strictly prohibited anywhere within the court premises.' },
   { num: '14', text: 'No food and drinks shall be allowed inside the court area.' },
+  { num: '15', text: 'Kindly park at the designated parking area at the back of the court, it is discouraged to park in front of the shop' },
+  { num: '16', text: 'Use the side entrance to enter Match & Sip.'},
 ];
 
 export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
@@ -419,16 +422,24 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                 <span className="text-xs font-black uppercase tracking-widest text-[#00C6FF]">
                   YOUR RESERVATION
                 </span>
-                <span className="text-xs font-mono text-[#B3A2DB]">
-                  {reservationDate}
-                </span>
+                <div className="flex items-center gap-2">
+                  {reservationDate === getTodayDateString() && (
+                    <span className="inline-flex items-center gap-1 rounded bg-[#00C6FF]/20 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#00C6FF]">
+                      <span className="h-1.5 w-1.5 rounded-full bg-[#00C6FF] animate-pulse" />
+                      TODAY
+                    </span>
+                  )}
+                  <span className="text-xs font-mono font-bold text-[#FFFFFF]">
+                    {reservationDate}
+                  </span>
+                </div>
               </div>
 
               {/* Slot list or empty alert */}
               <div className="min-h-[70px] flex flex-col justify-center">
                 {selectedSlots.length === 0 ? (
                   <p className="text-xs sm:text-sm text-[#B3A2DB] leading-relaxed">
-                    No slots selected. Head back to the matrix to pick your courts and times.
+                    No slots selected for <span className="font-semibold text-white">{reservationDate === getTodayDateString() ? `Today (${reservationDate})` : reservationDate}</span>. Head back to the matrix to pick your courts and times.
                   </p>
                 ) : (
                   <div className="space-y-2">
@@ -708,20 +719,10 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                               <span className="leading-snug">{uploadError}</span>
                             </div>
                           </div>
-                        ) : isFallbackBase64 ? (
-                          <div className="mt-1 flex flex-col gap-0.5">
-                            <span className="text-[11px] font-bold text-[#00C6FF] flex items-center gap-1">
-                              <CheckCircle2 className="h-3.5 w-3.5 text-[#00C6FF]" />
-                              Payment proof attached • Ready
-                            </span>
-                            <span className="text-[10px] text-white/60">
-                              Direct Base64 fallback active (compressed for reservation)
-                            </span>
-                          </div>
                         ) : (
                           <span className="mt-1 text-[11px] font-bold text-[#00C6FF] flex items-center gap-1">
                             <CheckCircle2 className="h-3.5 w-3.5 text-[#00C6FF]" />
-                            Screenshot uploaded • Ready
+                            Payment proof attached • Ready
                           </span>
                         )}
                       </div>
@@ -733,19 +734,9 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                             type="button"
                             onClick={() => uploadFileToStorage(currentFile)}
                             className="inline-flex items-center gap-1 rounded-lg bg-[#00C6FF] px-2 py-1 text-[11px] font-bold text-black hover:bg-[#00C6FF]/90 transition-colors cursor-pointer"
-                            title="Retry upload to Firebase Storage"
+                            title="Retry upload"
                           >
                             <RefreshCw className="h-3 w-3" /> Retry
-                          </button>
-                        )}
-                        {isFallbackBase64 && currentFile && (
-                          <button
-                            type="button"
-                            onClick={() => uploadFileToStorage(currentFile)}
-                            className="inline-flex items-center gap-1 rounded-lg bg-white/10 hover:bg-white/20 px-2 py-1 text-[11px] font-medium text-white transition-colors cursor-pointer"
-                            title="Retry upload to Firebase Storage"
-                          >
-                            <RefreshCw className="h-3 w-3" /> Retry Cloud
                           </button>
                         )}
                         <button

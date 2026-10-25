@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { Menu, X, CalendarCheck, MapPin } from 'lucide-react';
+import { Menu, X, CalendarCheck, MapPin, Database, ShieldCheck } from 'lucide-react';
 
 interface HeaderProps {
   onPlayTodayClick?: () => void;
@@ -120,6 +120,28 @@ export const Header: React.FC<HeaderProps> = ({
                 <span>Find Us &amp; Directions</span>
               </span>
             </button>
+
+            <Link
+              to="/bookings"
+              onClick={() => setMobileMenuOpen(false)}
+              className="flex items-center justify-between text-left py-2 font-bold text-[#FFFFFF] hover:text-[#00C6FF] transition-colors cursor-pointer border-t border-[#B3A2DB]/10 pt-3"
+            >
+              <span className="flex items-center gap-2">
+                <Database className="h-4 w-4 text-[#00C6FF]" />
+                <span>Bookings Admin</span>
+              </span>
+            </Link>
+
+            <Link
+              to="/analytics"
+              onClick={() => setMobileMenuOpen(false)}
+              className="flex items-center justify-between text-left py-2 font-bold text-[#FFFFFF] hover:text-[#00C6FF] transition-colors cursor-pointer"
+            >
+              <span className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-[#00C6FF]" />
+                <span>Security Analytics (48h)</span>
+              </span>
+            </Link>
 
             <div className="pt-2">
               <button

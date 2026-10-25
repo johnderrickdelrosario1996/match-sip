@@ -21,6 +21,7 @@ import {
   FileText,
   Download,
   FileSpreadsheet,
+  ShieldCheck,
 } from 'lucide-react';
 import { ConfirmedBooking } from '../types';
 import { 
@@ -32,6 +33,7 @@ import {
 import { EditBookingModal } from '../components/EditBookingModal';
 import { AddBookingModal } from '../components/AddBookingModal';
 import { CalendarPopup } from '../components/CalendarPopup';
+import { PinCodeInput } from '../components/PinCodeInput';
 import { 
   getTodayDateString, 
   formatDateToDDMMYYYY, 
@@ -569,30 +571,19 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
 
           {/* Form */}
           <form onSubmit={handleUnlockSubmit} className="space-y-6">
-            {/* Rectangular PIN Display Box with Cyan Border & Working Text Cursor */}
-            <div
-              onClick={() => pinInputRef.current?.focus()}
-              className={`relative flex h-16 sm:h-18 w-full cursor-text items-center justify-center rounded-xl border transition-all ${
-                isShaking
-                  ? 'border-red-400 bg-red-500/10 animate-shake'
-                  : 'border-[#00C6FF] bg-black/20 focus-within:ring-2 focus-within:ring-[#00C6FF]/50'
-              }`}
-            >
-              <input
-                ref={pinInputRef}
-                id="admin-pin-input"
-                type="password"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                maxLength={4}
-                autoFocus
-                value={pin}
-                onChange={handlePinChange}
-                placeholder="• • • •"
-                className="w-full h-full bg-transparent text-center text-white text-3xl sm:text-4xl font-black tracking-[0.6em] focus:outline-none caret-[#00C6FF] placeholder:text-white/25 placeholder:font-black placeholder:tracking-[0.6em] cursor-text selection:bg-[#00C6FF] selection:text-black px-4"
-                aria-label="Admin PIN"
-              />
-            </div>
+            {/* PIN Display Box with Circles & Dynamic Blinking Cursor */}
+            <PinCodeInput
+              pin={pin}
+              onChange={(newPin) => {
+                setPin(newPin);
+                setAuthError(null);
+              }}
+              onSubmit={(pinToVerify) => verifyPin(pinToVerify)}
+              inputRef={pinInputRef}
+              isShaking={isShaking}
+              autoFocus={true}
+              id="admin-pin-input"
+            />
 
             {/* Error Feedback */}
             {authError && (
@@ -636,6 +627,16 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
 
           <div className="flex items-center gap-3 ml-auto justify-end flex-wrap">
+
+            {/* VISITOR ANALYTICS BUTTON */}
+            <Link
+              to="/analytics"
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-sky-400/40 bg-sky-500/15 px-3.5 py-1.5 text-xs font-bold text-sky-200 transition-all hover:bg-sky-500/25 hover:border-sky-400/60 shadow-sm"
+              title="View 48-Hour Visitor Analytics & Security Logs"
+            >
+              <ShieldCheck className="h-4 w-4 text-[#00C6FF]" />
+              <span>Visitor Analytics</span>
+            </Link>
 
             {/* EXPORT TO CSV BUTTON */}
             <button

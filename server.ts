@@ -20,6 +20,14 @@ import {
   bookingsWriteLimiter,
   duplicateBookingProtection,
 } from './src/middleware/rateLimiter.ts';
+import {
+  recordAnalyticsEvent,
+  getAnalyticsLogs,
+  purgeOldAnalyticsLogs,
+  getAnalyticsMetrics,
+  deleteAnalyticsLogById,
+  clearAllAnalyticsLogs,
+} from './src/db/analytics.ts';
 
 dotenv.config({ override: true });
 
@@ -58,6 +66,38 @@ function getMaskedKey(key?: string): string {
   const trimmed = key.trim();
   if (trimmed.length <= 8) return '****';
   return `${trimmed.slice(0, 5)}...${trimmed.slice(-4)}`;
+}
+
+// Helper to extract client IP address (handling proxy headers like x-forwarded-for)
+function getClientIp(req: express.Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') {
+    return forwarded.split(',')[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    return forwarded[0].trim();
+  }
+  return req.socket?.remoteAddress || '127.0.0.1';
+}
+
+function getUserAgent(req: express.Request): string {
+  return (req.headers['user-agent'] as string) || 'Unknown';
+}
+
+// Authentication gate for analytics endpoints (matches /bookings admin gate)
+function requireAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const pinHeader = req.headers['x-admin-pin'] as string | undefined;
+  const authHeader = req.headers['authorization'];
+  if (pinHeader && pinHeader.trim() === '0912') {
+    return next();
+  }
+  if (authHeader && authHeader.trim().startsWith('Bearer 0912')) {
+    return next();
+  }
+  return res.status(401).json({
+    success: false,
+    error: 'Unauthorized: Admin authentication required to access security analytics.',
+  });
 }
 
 /**
@@ -365,6 +405,14 @@ app.post(
         return res.status(400).json({ error: 'bookingReference and selectedDate are required' });
       }
       const result = await saveBookingWithLocks(bookingInput);
+
+      // Record security audit / booking analytics event
+      recordAnalyticsEvent({
+        ipAddress: getClientIp(req),
+        action: `Booking Confirmed: #${bookingInput.bookingReference} (${bookingInput.customerName} • ₱${bookingInput.totalAmount || 0})`,
+        userAgent: getUserAgent(req),
+      }).catch(() => {});
+
       res.json({ success: true, booking: result });
     } catch (error: any) {
       console.error('Failed to save booking to Cloud SQL:', error);
@@ -382,6 +430,14 @@ app.put('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), async (
     if (!updated) {
       return res.status(404).json({ error: 'Booking not found' });
     }
+
+    // Record security audit event
+    recordAnalyticsEvent({
+      ipAddress: getClientIp(req),
+      action: `Admin Updated Booking: #${reference}`,
+      userAgent: getUserAgent(req),
+    }).catch(() => {});
+
     res.json({ success: true, booking: updated });
   } catch (error: any) {
     console.error('Failed to update booking in Cloud SQL:', error);
@@ -393,12 +449,102 @@ app.delete('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), asyn
   try {
     const { reference } = req.params;
     const deleted = await deleteBookingByReference(reference);
+
+    // Record security audit event
+    recordAnalyticsEvent({
+      ipAddress: getClientIp(req),
+      action: `Admin Deleted Booking: #${reference}`,
+      userAgent: getUserAgent(req),
+    }).catch(() => {});
+
     res.json({ success: true, deletedBooking: deleted });
   } catch (error: any) {
     console.error('Failed to delete booking in Cloud SQL:', error);
     res.status(500).json({ error: error.message || 'Failed to delete booking' });
   }
 });
+
+/**
+ * Visitor Analytics & Security Audit Tracking Endpoint
+ */
+app.post('/api/analytics/track', bookingsWriteLimiter(150, 60000), async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+    const ua = getUserAgent(req);
+    const action = req.body?.action || 'Page View';
+    await recordAnalyticsEvent({
+      ipAddress: ip,
+      action: String(action).slice(0, 500),
+      userAgent: ua,
+    });
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('Analytics track error:', err);
+    res.status(500).json({ success: false, error: 'Tracking failed' });
+  }
+});
+
+/**
+ * Protected Visitor Analytics Query Endpoint (Rolling 48-Hour Window)
+ */
+app.get('/api/analytics', bookingsReadLimiter(60, 60000), requireAdminAuth, async (req, res) => {
+  try {
+    const limitCount = req.query.limit ? Number(req.query.limit) : 500;
+    const [logs, metrics] = await Promise.all([
+      getAnalyticsLogs(limitCount),
+      getAnalyticsMetrics(),
+    ]);
+    res.json({ success: true, logs, metrics });
+  } catch (error: any) {
+    console.error('Failed to fetch analytics:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to fetch analytics' });
+  }
+});
+
+/**
+ * Delete a specific analytics log record (Protected with requireAdminAuth)
+ */
+app.delete('/api/analytics/:id', bookingsWriteLimiter(30, 60000), requireAdminAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid record ID' });
+    }
+    const deleted = await deleteAnalyticsLogById(id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'Analytics record not found' });
+    }
+    res.json({ success: true, message: `Record #${id} deleted`, deleted });
+  } catch (error: any) {
+    console.error('Failed to delete analytics record:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to delete record' });
+  }
+});
+
+/**
+ * Reset / purge all present visitor analytics logs and refresh the tracking feed (Protected with requireAdminAuth)
+ */
+app.delete('/api/analytics', bookingsWriteLimiter(10, 60000), requireAdminAuth, async (req, res) => {
+  try {
+    const result = await clearAllAnalyticsLogs();
+    res.json({
+      success: true,
+      message: `Cleared ${result.count} analytics records. Analytics feed refreshed.`,
+      count: result.count,
+    });
+  } catch (error: any) {
+    console.error('Failed to clear analytics logs:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to clear analytics logs' });
+  }
+});
+
+// Periodic background job: enforces 48-hour rolling retention window (every 30 minutes)
+setInterval(() => {
+  purgeOldAnalyticsLogs(48).catch((err) => {
+    console.warn('[ANALYTICS] Scheduled 48-hour purge warning:', err);
+  });
+}, 30 * 60 * 1000);
+
 
 /**
  * 1. CHECKOUT CREATION API (/api/create-checkout)
@@ -426,6 +572,13 @@ app.post(
       slots = [],
       totalAmount,
     } = booking;
+
+    // Record security audit event
+    recordAnalyticsEvent({
+      ipAddress: getClientIp(req),
+      action: `Checkout Session Initiated: #${bookingReference} (₱${totalAmount})`,
+      userAgent: getUserAgent(req),
+    }).catch(() => {});
 
     const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
     const host = req.headers['x-forwarded-host'] || req.get('host') || 'localhost:3000';

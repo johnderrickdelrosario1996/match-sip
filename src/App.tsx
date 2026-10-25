@@ -43,27 +43,37 @@ export default function App() {
   // Network drop tracking & offline fallbacks
   const { isOnline, wasOffline } = useNetworkStatus();
 
-  // Restore cached selected date if valid
+  // Always initialize selected booking date to today's current date in local time (YYYY-MM-DD) on page load/refresh
   const [selectedDate, setSelectedDate] = useState<string>(() => {
+    const today = getTodayDateString();
+    // Clean up any stale date from previous sessions so refreshes always start on today
     try {
-      const saved = localStorage.getItem(SELECTED_DATE_STORAGE_KEY);
-      if (saved && /^\d{4}-\d{2}-\d{2}$/.test(saved)) {
-        return saved;
-      }
+      localStorage.removeItem(SELECTED_DATE_STORAGE_KEY);
     } catch {}
-    return getTodayDateString();
+    return today;
   });
 
-  // Restore cached selected slots so network drops or reloads never lose user's chosen court slots
+  // Restore cached selected slots only if saved recently and valid for today or a future date
   const [selectedSlots, setSelectedSlots] = useState<SelectedSlot[]>(() => {
     try {
       const raw = localStorage.getItem(SELECTED_SLOTS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed && Array.isArray(parsed.slots) && (Date.now() - (parsed.savedAt || 0) < 12 * 60 * 60 * 1000)) {
-          return parsed.slots;
+        const today = getTodayDateString();
+        if (
+          parsed &&
+          Array.isArray(parsed.slots) &&
+          Date.now() - (parsed.savedAt || 0) < 2 * 60 * 60 * 1000
+        ) {
+          const validSlots = parsed.slots.filter(
+            (s: SelectedSlot) => s && s.date && s.date >= today
+          );
+          if (validSlots.length > 0) {
+            return validSlots;
+          }
         }
       }
+      localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
     } catch {}
     return [];
   });
@@ -80,34 +90,41 @@ export default function App() {
   });
   const [isReservationsModalOpen, setIsReservationsModalOpen] = useState<boolean>(false);
 
-  // Sync selected date to local storage
+  // Sync active draft slots to local storage so sudden connection drops don't lose the user's ongoing selection
   useEffect(() => {
     try {
-      localStorage.setItem(SELECTED_DATE_STORAGE_KEY, selectedDate);
-    } catch {}
-  }, [selectedDate]);
-
-  // Sync selected slots to local storage so connection drops don't lose slots
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        SELECTED_SLOTS_STORAGE_KEY,
-        JSON.stringify({ slots: selectedSlots, savedAt: Date.now() })
-      );
+      if (selectedSlots.length > 0) {
+        localStorage.setItem(
+          SELECTED_SLOTS_STORAGE_KEY,
+          JSON.stringify({ slots: selectedSlots, savedAt: Date.now() })
+        );
+      } else {
+        localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
+      }
     } catch {}
   }, [selectedSlots]);
 
-  // Everyday real-time sync: when midnight hits, dynamically advance current day
+  // Real-time date synchronization: automatically advance when midnight passes or when window regains focus
   useEffect(() => {
     let lastKnownToday = getTodayDateString();
-    const interval = setInterval(() => {
+
+    const syncTodayDate = () => {
       const nowToday = getTodayDateString();
       if (nowToday !== lastKnownToday) {
         setSelectedDate((prev) => (prev === lastKnownToday ? nowToday : prev));
         lastKnownToday = nowToday;
       }
-    }, 15000);
-    return () => clearInterval(interval);
+    };
+
+    const interval = setInterval(syncTodayDate, 10000);
+    window.addEventListener('focus', syncTodayDate);
+    document.addEventListener('visibilitychange', syncTodayDate);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', syncTodayDate);
+      document.removeEventListener('visibilitychange', syncTodayDate);
+    };
   }, []);
 
   const showToast = useCallback((msg: string) => {

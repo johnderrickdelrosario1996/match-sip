@@ -70,3 +70,18 @@ h1, h2, h3, h4, h5, h6, .font-heading {
 .animate-shake {
   animation: shake 0.45s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
 }
+
+/* Dynamic Blue Terminal Blinking Cursor */
+@keyframes terminalCursorBlink {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
+  }
+}
+
+.animate-terminal-cursor {
+  animation: terminalCursorBlink 0.9s infinite;
+}
+
