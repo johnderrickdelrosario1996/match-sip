@@ -49,7 +49,7 @@ export const PinCodeInput: React.FC<PinCodeInputProps> = ({
         // Left edge of the circle (slot is 48px wide, circle is 18px wide -> circle offset is 15px)
         // Cursor sits 4px to the left of the circle
         const circleLeftOffset = (slotRect.width - 18) / 2;
-        const targetX = slotRect.left - containerRect.left + circleLeftOffset - 4.5;
+        const targetX = slotRect.left - containerRect.left + circleLeftOffset - 5;
         setCursorX(Math.max(0, targetX));
         return;
       }
@@ -60,18 +60,18 @@ export const PinCodeInput: React.FC<PinCodeInputProps> = ({
         const slotRect = finalSlotEl.getBoundingClientRect();
         const containerRect = container.getBoundingClientRect();
         const circleRightOffset = (slotRect.width + 18) / 2;
-        const targetX = slotRect.left - containerRect.left + circleRightOffset + 4.5;
+        const targetX = slotRect.left - containerRect.left + circleRightOffset + 5;
         setCursorX(targetX);
         return;
       }
     }
 
     // Mathematical fallback if DOM rects are not yet available
-    // Slot width = 48px, gap = 16px -> step = 64px, initial left offset ~ 14px
+    // Slot width = 48px, gap = 16px -> step = 64px, initial left offset ~ 13px
     if (currentLength < length) {
-      setCursorX(currentLength * 64 + 14);
+      setCursorX(currentLength * 64 + 13);
     } else {
-      setCursorX((length - 1) * 64 + 36 + 6);
+      setCursorX((length - 1) * 64 + 36 + 5);
     }
   }, [pin.length, length]);
 
@@ -109,11 +109,11 @@ export const PinCodeInput: React.FC<PinCodeInputProps> = ({
   return (
     <div
       onClick={handleContainerClick}
-      className={`relative flex h-16 sm:h-20 w-full cursor-text items-center justify-center rounded-2xl border transition-all select-none overflow-hidden ${
+      className={`relative flex h-16 sm:h-18 w-full cursor-text items-center justify-center rounded-2xl border transition-all select-none overflow-hidden ${
         isShaking
           ? 'border-red-400 bg-red-500/10 animate-shake'
           : isFocused
-          ? 'border-[#00C6FF] bg-black/30 shadow-[0_0_20px_rgba(0,198,255,0.15)] ring-1 ring-[#00C6FF]/40'
+          ? 'border-[#00C6FF] bg-black/30 shadow-[0_0_24px_rgba(0,198,255,0.2)] ring-1 ring-[#00C6FF]/40'
           : 'border-[#00C6FF]/60 bg-black/20 hover:border-[#00C6FF]'
       } ${className}`}
     >
@@ -141,13 +141,13 @@ export const PinCodeInput: React.FC<PinCodeInputProps> = ({
         ref={containerRef}
         className="relative flex items-center justify-center gap-3 sm:gap-4 px-4 py-2 pointer-events-none z-10"
       >
-        {/* The Dynamic Blue Terminal Blinking Cursor (|) */}
+        {/* The Dynamic Blue Terminal Blinking Cursor (|) - lower vertical placement for baseline harmony */}
         {isFocused && (
           <span
-            className="absolute top-1/2 -translate-y-1/2 w-[2.5px] h-6 sm:h-7 rounded-full bg-[#00C6FF] shadow-[0_0_10px_#00C6FF] animate-terminal-cursor transition-transform duration-200 ease-out z-20 pointer-events-none"
+            className="absolute top-1/2 w-[2.5px] sm:w-[3px] h-[34px] sm:h-[38px] rounded-full bg-[#00C6FF] shadow-[0_0_12px_rgba(0,198,255,0.9),0_0_4px_#00C6FF] animate-terminal-cursor transition-transform duration-200 ease-out z-20 pointer-events-none"
             style={{
               left: 0,
-              transform: `translate(${cursorX}px, -50%)`,
+              transform: `translate(${cursorX}px, calc(-50% + 5px))`,
             }}
             aria-hidden="true"
           />

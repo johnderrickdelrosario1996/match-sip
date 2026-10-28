@@ -627,17 +627,6 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
 
           <div className="flex items-center gap-3 ml-auto justify-end flex-wrap">
-
-            {/* VISITOR ANALYTICS BUTTON */}
-            <Link
-              to="/analytics"
-              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-sky-400/40 bg-sky-500/15 px-3.5 py-1.5 text-xs font-bold text-sky-200 transition-all hover:bg-sky-500/25 hover:border-sky-400/60 shadow-sm"
-              title="View 48-Hour Visitor Analytics & Security Logs"
-            >
-              <ShieldCheck className="h-4 w-4 text-[#00C6FF]" />
-              <span>Visitor Analytics</span>
-            </Link>
-
             {/* EXPORT TO CSV BUTTON */}
             <button
               type="button"
