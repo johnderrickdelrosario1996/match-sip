@@ -1,34 +1,59 @@
-import { db } from './index.ts';
-import { users } from './schema.ts';
+import { supabase, isSupabaseConfigured, isTableMissingError } from '../lib/supabase.ts';
 
 export async function getOrCreateUser(uid: string, email: string) {
-  try {
-    const result = await db
-      .insert(users)
-      .values({
-        uid,
-        email,
-      })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: {
-          email,
-        },
-      })
-      .returning();
+  if (!isSupabaseConfigured) {
+    return { uid, email };
+  }
 
-    return result[0];
-  } catch (error) {
-    console.error('Failed to get or create user:', error);
-    throw new Error('Database user operation failed.', { cause: error });
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .upsert({ uid, email }, { onConflict: 'uid' })
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      if (isTableMissingError(error)) {
+        return { uid, email };
+      }
+      console.error('Failed to get or create user in Supabase:', error);
+      throw new Error(error.message || 'Database user operation failed.');
+    }
+
+    return data || { uid, email };
+  } catch (error: any) {
+    if (isTableMissingError(error)) {
+      return { uid, email };
+    }
+    console.error('Failed to get or create user in Supabase:', error);
+    throw new Error(error.message || 'Database user operation failed.', { cause: error });
   }
 }
 
 export async function getUsers() {
+  if (!isSupabaseConfigured) {
+    return [];
+  }
+
   try {
-    return await db.select().from(users);
-  } catch (error) {
-    console.error('Database query failed:', error);
+    const { data, error } = await supabase
+      .from('users')
+      .select('*');
+
+    if (error) {
+      if (isTableMissingError(error)) {
+        return [];
+      }
+      console.error('Failed to fetch users from Supabase:', error);
+      throw new Error(error.message || 'Database query failed.');
+    }
+
+    return data || [];
+  } catch (error: any) {
+    if (isTableMissingError(error)) {
+      return [];
+    }
+    console.error('Failed to query users from Supabase:', error);
     throw new Error('Database query failed. Please try again later.', { cause: error });
   }
 }

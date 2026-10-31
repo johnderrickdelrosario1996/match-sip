@@ -1,6 +1,4 @@
-import { desc, sql, gte } from 'drizzle-orm';
-import { db } from './index.ts';
-import { visitorAnalytics } from './schema.ts';
+import { supabase, isSupabaseConfigured, isTableMissingError } from '../lib/supabase.ts';
 
 export interface AnalyticsEventInput {
   ipAddress: string;
@@ -9,59 +7,92 @@ export interface AnalyticsEventInput {
 }
 
 /**
- * Record a visitor analytics / security audit event.
- * Automatically enforces a rolling 48-hour window by auto-deleting records older than 48 hours.
+ * Normalizes an analytics log row from Supabase
+ */
+export function normalizeAnalyticsRow(row: any) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ipAddress: row.ip_address ?? row.ipAddress ?? '',
+    action: row.action ?? '',
+    userAgent: row.user_agent ?? row.userAgent ?? '',
+    timestamp: row.timestamp ?? new Date().toISOString(),
+  };
+}
+
+/**
+ * Record a visitor analytics / security audit event using Supabase syntax.
  */
 export async function recordAnalyticsEvent(event: AnalyticsEventInput) {
+  if (!isSupabaseConfigured) {
+    return null;
+  }
+
   try {
     const cleanIp = (event.ipAddress || 'unknown').slice(0, 255);
     const cleanAction = (event.action || 'view').trim();
     const cleanUa = (event.userAgent || '').slice(0, 1000);
 
-    const result = await db
-      .insert(visitorAnalytics)
-      .values({
-        ipAddress: cleanIp,
+    const { data, error } = await supabase
+      .from('visitor_analytics')
+      .insert({
+        ip_address: cleanIp,
         action: cleanAction,
-        userAgent: cleanUa,
+        user_agent: cleanUa,
       })
-      .returning();
+      .select()
+      .maybeSingle();
 
-    // Probabilistic or immediate cleanup of logs older than 48 hours to maintain a rolling 48h log window
-    // (runs asynchronously so it never slows down client requests)
-    if (Math.random() < 0.25) {
-      purgeOldAnalyticsLogs(48).catch((err) => {
-        console.warn('[ANALYTICS] Auto-purge warning:', err);
-      });
+    if (error && !isTableMissingError(error)) {
+      console.warn('[ANALYTICS] Supabase record insert notice:', error.message);
     }
 
-    return result[0];
+    // Probabilistically purge old logs to maintain the 48h window
+    if (Math.random() < 0.25) {
+      purgeOldAnalyticsLogs(48).catch(() => {});
+    }
+
+    return data ? normalizeAnalyticsRow(data) : null;
   } catch (error) {
-    console.error('Failed to record visitor analytics event:', error);
-    // Non-blocking: analytics should never crash application operations
+    if (!isTableMissingError(error)) {
+      console.error('Failed to record visitor analytics event in Supabase:', error);
+    }
     return null;
   }
 }
 
 /**
- * Get visitor analytics logs within the 48-hour window.
+ * Get visitor analytics logs within the 48-hour window using Supabase syntax.
  */
 export async function getAnalyticsLogs(limitCount = 500) {
-  try {
-    // Purge any logs older than 48 hours
-    await purgeOldAnalyticsLogs(48);
+  if (!isSupabaseConfigured) {
+    return [];
+  }
 
-    // Query logs within the 48-hour window
-    const logs = await db
-      .select()
-      .from(visitorAnalytics)
-      .where(sql`${visitorAnalytics.timestamp} >= NOW() - INTERVAL '48 hours'`)
-      .orderBy(desc(visitorAnalytics.timestamp))
+  try {
+    const cutoffIso = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+    let { data, error } = await supabase
+      .from('visitor_analytics')
+      .select('*')
+      .gte('timestamp', cutoffIso)
+      .order('timestamp', { ascending: false })
       .limit(limitCount);
 
-    return logs;
-  } catch (error) {
-    console.error('Failed to fetch visitor analytics logs:', error);
+    if (error) {
+      if (isTableMissingError(error)) {
+        return [];
+      }
+      console.error('Failed to fetch visitor analytics logs from Supabase:', error);
+      throw new Error(error.message || 'Database query for visitor analytics failed.');
+    }
+
+    return (data || []).map(normalizeAnalyticsRow);
+  } catch (error: any) {
+    if (isTableMissingError(error)) {
+      return [];
+    }
+    console.error('Failed to fetch visitor analytics logs from Supabase:', error);
     throw new Error('Database query for visitor analytics failed.', { cause: error });
   }
 }
@@ -71,26 +102,44 @@ export async function getAnalyticsLogs(limitCount = 500) {
  */
 export async function purgeOldAnalyticsLogs(hoursWindow = 48) {
   try {
-    await db.execute(
-      sql`DELETE FROM visitor_analytics WHERE timestamp < NOW() - INTERVAL '${sql.raw(String(hoursWindow))} hours'`
-    );
+    const cutoffIso = new Date(Date.now() - hoursWindow * 60 * 60 * 1000).toISOString();
+    await supabase
+      .from('visitor_analytics')
+      .delete()
+      .lt('timestamp', cutoffIso);
   } catch (error) {
-    console.warn('Failed to purge old analytics logs:', error);
+    if (!isTableMissingError(error)) {
+      console.warn('Failed to purge old analytics logs from Supabase:', error);
+    }
   }
 }
 
 /**
- * Delete a specific analytics log record by its ID.
+ * Delete a specific analytics log record by its ID using Supabase syntax.
  */
 export async function deleteAnalyticsLogById(id: number) {
   try {
-    const deleted = await db
-      .delete(visitorAnalytics)
-      .where(sql`${visitorAnalytics.id} = ${id}`)
-      .returning();
-    return deleted[0] || null;
-  } catch (error) {
-    console.error('Failed to delete analytics log by ID:', error);
+    const { data, error } = await supabase
+      .from('visitor_analytics')
+      .delete()
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      if (isTableMissingError(error)) {
+        return { id };
+      }
+      console.error('Failed to delete analytics log by ID in Supabase:', error);
+      throw new Error(error.message || 'Database error deleting analytics record');
+    }
+
+    return data ? normalizeAnalyticsRow(data) : { id };
+  } catch (error: any) {
+    if (isTableMissingError(error)) {
+      return { id };
+    }
+    console.error('Failed to delete analytics log by ID in Supabase:', error);
     throw new Error('Database error deleting analytics record', { cause: error });
   }
 }
@@ -100,64 +149,108 @@ export async function deleteAnalyticsLogById(id: number) {
  */
 export async function clearAllAnalyticsLogs() {
   try {
-    const deleted = await db.delete(visitorAnalytics).returning();
-    return { count: deleted.length };
-  } catch (error) {
-    console.error('Failed to clear all analytics logs:', error);
+    const { data, error } = await supabase
+      .from('visitor_analytics')
+      .delete()
+      .neq('id', -1)
+      .select();
+
+    if (error) {
+      if (isTableMissingError(error)) {
+        return { count: 0 };
+      }
+      console.error('Failed to clear all analytics logs in Supabase:', error);
+      throw new Error(error.message || 'Database error clearing analytics logs');
+    }
+
+    return { count: data ? data.length : 0 };
+  } catch (error: any) {
+    if (isTableMissingError(error)) {
+      return { count: 0 };
+    }
+    console.error('Failed to clear all analytics logs in Supabase:', error);
     throw new Error('Database error clearing analytics logs', { cause: error });
   }
 }
 
 /**
- * Get summary metrics for the 48-hour analytics window.
+ * Get summary metrics for the 48-hour analytics window using Supabase data.
  */
 export async function getAnalyticsMetrics() {
-  try {
-    const countsResult = await db.execute(sql`
-      SELECT 
-        COUNT(*)::int as total_events,
-        COUNT(DISTINCT ip_address)::int as unique_ips,
-        COUNT(CASE WHEN action LIKE '%Booking%' OR action LIKE '%checkout%' THEN 1 END)::int as booking_actions,
-        COUNT(CASE WHEN action LIKE '%Slot%' THEN 1 END)::int as slot_interactions
-      FROM visitor_analytics 
-      WHERE timestamp >= NOW() - INTERVAL '48 hours';
-    `);
-
-    const topActionsResult = await db.execute(sql`
-      SELECT action, COUNT(*)::int as count
-      FROM visitor_analytics
-      WHERE timestamp >= NOW() - INTERVAL '48 hours'
-      GROUP BY action
-      ORDER BY count DESC
-      LIMIT 6;
-    `);
-
-    const topIpsResult = await db.execute(sql`
-      SELECT ip_address, COUNT(*)::int as count
-      FROM visitor_analytics
-      WHERE timestamp >= NOW() - INTERVAL '48 hours'
-      GROUP BY ip_address
-      ORDER BY count DESC
-      LIMIT 6;
-    `);
-
-    const counts = (countsResult as any).rows?.[0] || {
-      total_events: 0,
-      unique_ips: 0,
-      booking_actions: 0,
-      slot_interactions: 0,
+  if (!isSupabaseConfigured) {
+    return {
+      totalEvents: 0,
+      uniqueIps: 0,
+      bookingActions: 0,
+      slotInteractions: 0,
+      topActions: [],
+      topIps: [],
     };
+  }
+
+  try {
+    const cutoffIso = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await supabase
+      .from('visitor_analytics')
+      .select('*')
+      .gte('timestamp', cutoffIso);
+
+    if (error || !data) {
+      return {
+        totalEvents: 0,
+        uniqueIps: 0,
+        bookingActions: 0,
+        slotInteractions: 0,
+        topActions: [],
+        topIps: [],
+      };
+    }
+
+    const uniqueIpsSet = new Set<string>();
+    let bookingActions = 0;
+    let slotInteractions = 0;
+    const actionCounts: Record<string, number> = {};
+    const ipCounts: Record<string, number> = {};
+
+    for (const item of data) {
+      const ip = (item.ip_address ?? item.ipAddress ?? 'unknown').trim();
+      const action = (item.action ?? 'view').trim();
+
+      if (ip) {
+        uniqueIpsSet.add(ip);
+        ipCounts[ip] = (ipCounts[ip] || 0) + 1;
+      }
+
+      if (action.includes('Booking') || action.toLowerCase().includes('checkout')) {
+        bookingActions++;
+      }
+      if (action.includes('Slot')) {
+        slotInteractions++;
+      }
+
+      actionCounts[action] = (actionCounts[action] || 0) + 1;
+    }
+
+    const topActions = Object.entries(actionCounts)
+      .map(([action, count]) => ({ action, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+
+    const topIps = Object.entries(ipCounts)
+      .map(([ip_address, count]) => ({ ip_address, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
 
     return {
-      totalEvents: Number(counts.total_events) || 0,
-      uniqueIps: Number(counts.unique_ips) || 0,
-      bookingActions: Number(counts.booking_actions) || 0,
-      slotInteractions: Number(counts.slot_interactions) || 0,
-      topActions: (topActionsResult as any).rows || [],
-      topIps: (topIpsResult as any).rows || [],
+      totalEvents: data.length,
+      uniqueIps: uniqueIpsSet.size,
+      bookingActions,
+      slotInteractions,
+      topActions,
+      topIps,
     };
   } catch (error) {
-    console.error('Failed to calculate analytics metrics:', error);
     return {
       totalEvents: 0,
       uniqueIps: 0,

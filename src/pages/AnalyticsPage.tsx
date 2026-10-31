@@ -690,7 +690,7 @@ export const AnalyticsPage: React.FC = () => {
                   <tr>
                     <td colSpan={5} className="py-12 text-center text-gray-400">
                       <RefreshCw className="h-6 w-6 animate-spin mx-auto mb-2 text-[#00C6FF]" />
-                      <span>Loading visitor security logs from Cloud SQL...</span>
+                      <span>Loading visitor security logs from Supabase...</span>
                     </td>
                   </tr>
                 ) : paginatedLogs.length === 0 ? (
@@ -864,7 +864,7 @@ export const AnalyticsPage: React.FC = () => {
             </div>
 
             <p className="text-xs text-gray-600 leading-relaxed mb-6">
-              This action will permanently delete all <strong className="text-gray-900 font-bold">{logs.length} logged visitor events</strong> stored in Cloud SQL. The feed and metrics will be reset to fresh state immediately.
+              This action will permanently delete all <strong className="text-gray-900 font-bold">{logs.length} logged visitor events</strong> stored in Supabase. The feed and metrics will be reset to fresh state immediately.
             </p>
 
             <div className="flex items-center justify-end gap-2.5">

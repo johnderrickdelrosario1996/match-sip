@@ -10,7 +10,8 @@ import {
   Download,
   Cloud,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  ChevronDown
 } from 'lucide-react';
 import { SelectedSlot, ConfirmedBooking } from '../types';
 import qrCodeImg from '../assets/images/INSTAPAY QR CODE.jpg';
@@ -78,6 +79,42 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
   const [showSafetyModal, setShowSafetyModal] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showReceiptPreviewModal, setShowReceiptPreviewModal] = useState(false);
+
+  // Safety reminders scroll verification state
+  const [hasScrolledToBottom, setHasScrolledToBottom] = useState(false);
+  const rulesContainerRef = useRef<HTMLDivElement>(null);
+
+  // Reset or detect scroll state when safety modal opens
+  useEffect(() => {
+    if (showSafetyModal) {
+      if (safetyAgreed) {
+        setHasScrolledToBottom(true);
+      } else {
+        setHasScrolledToBottom(false);
+        // Automatically unlock if modal content fits without scrollbar on tall viewports
+        const timer = setTimeout(() => {
+          const el = rulesContainerRef.current;
+          if (el) {
+            const hasOverflow = el.scrollHeight > el.clientHeight + 15;
+            if (!hasOverflow) {
+              setHasScrolledToBottom(true);
+            }
+          }
+        }, 150);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [showSafetyModal, safetyAgreed]);
+
+  const handleRulesScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (hasScrolledToBottom) return;
+    const target = e.currentTarget;
+    // When within 24px of the bottom, unlock the agreement button
+    const isAtBottom = target.scrollTop + target.clientHeight >= target.scrollHeight - 24;
+    if (isAtBottom) {
+      setHasScrolledToBottom(true);
+    }
+  };
 
   // Sync draft to local storage so connection drops keep user input safe
   useEffect(() => {
@@ -979,7 +1016,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                     Pickleball Court Safety Reminders
                   </h3>
                   <span className="text-[11px] font-bold tracking-wider uppercase text-[#00C6FF]">
-                    14 Mandatory Safety Guidelines
+                    {COURT_SAFETY_RULES.length} Mandatory Safety Guidelines
                   </span>
                 </div>
               </div>
@@ -994,8 +1031,12 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
               </button>
             </div>
 
-            {/* Scrollable Rules List */}
-            <div className="overflow-y-auto max-h-[58vh] pr-1.5 sm:pr-2.5 my-4 space-y-2.5">
+            {/* Scrollable Rules List with bottom detection */}
+            <div
+              ref={rulesContainerRef}
+              onScroll={handleRulesScroll}
+              className="overflow-y-auto max-h-[58vh] pr-1.5 sm:pr-2.5 my-4 space-y-2.5 scroll-smooth"
+            >
               {COURT_SAFETY_RULES.map((rule) => (
                 <div
                   key={rule.num}
@@ -1017,13 +1058,29 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
             <div className="pt-3 border-t border-[#B3A2DB]/20 shrink-0">
               <button
                 type="button"
+                disabled={!hasScrolledToBottom}
                 onClick={() => {
+                  if (!hasScrolledToBottom) return;
                   setSafetyAgreed(true);
                   setShowSafetyModal(false);
                 }}
-                className="w-full rounded-xl bg-[#00C6FF] py-3.5 text-center text-xs sm:text-sm font-black uppercase tracking-wider text-black hover:bg-[#00C6FF]/90 shadow-lg shadow-[#00C6FF]/25 hover:scale-[1.01] active:scale-98 transition-all cursor-pointer font-bold"
+                className={`w-full rounded-xl py-3.5 text-center text-xs sm:text-sm font-black uppercase tracking-wider transition-all duration-200 min-h-[48px] flex items-center justify-center gap-2 ${
+                  hasScrolledToBottom
+                    ? 'bg-[#00C6FF] text-black hover:bg-[#00C6FF]/90 shadow-lg shadow-[#00C6FF]/25 hover:scale-[1.01] active:scale-98 cursor-pointer font-bold'
+                    : 'bg-[#B3A2DB]/15 text-[#FFFFFF]/35 cursor-not-allowed border border-[#B3A2DB]/20 shadow-none select-none'
+                }`}
               >
-                I UNDERSTAND &amp; AGREE TO ALL RULES
+                {hasScrolledToBottom ? (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 text-black stroke-[2.5] shrink-0" />
+                    <span>I UNDERSTAND &amp; AGREE TO ALL RULES</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="h-4 w-4 animate-bounce text-[#00C6FF] shrink-0" />
+                    <span>SCROLL DOWN TO READ ALL REMINDERS</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

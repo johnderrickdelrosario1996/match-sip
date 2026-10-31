@@ -65,7 +65,7 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
     onSelectDate(nextDate);
   };
 
-  // Extract all booked slot IDs and time matches for the current selected date from Cloud SQL
+  // Extract all booked slot IDs and time matches for the current selected date from Supabase
   const bookedSlotsMap = useMemo(() => {
     const map = new Map<string, { bookingRef: string; customerName: string; status: string }>();
 
@@ -497,20 +497,20 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
               )}
             </div>
 
-            {/* Continue to Checkout Button */}
+            {/* Continue to Checkout / Book Reservation Button */}
             <div className="mt-4 pt-3 border-t border-[#B3A2DB]/20">
               <button
                 type="button"
                 id="continue-to-checkout-btn"
                 onClick={onProceedToCheckout}
                 disabled={selectedSlots.length === 0}
-                className={`w-full rounded-xl py-4 px-6 text-center text-xs sm:text-sm font-black uppercase tracking-wider transition-all min-h-[50px] flex items-center justify-center gap-2 ${
+                className={`w-full rounded-xl py-4 px-6 text-center text-xs sm:text-sm font-black uppercase tracking-wider transition-all min-h-[52px] sm:min-h-[56px] flex items-center justify-center gap-2 ${
                   selectedSlots.length > 0
-                    ? 'bg-[#00C6FF] text-black shadow-lg shadow-[#00C6FF]/25 hover:bg-[#00C6FF]/90 hover:scale-[1.01] active:scale-95 cursor-pointer'
+                    ? 'bg-[#00C6FF] text-black shadow-lg shadow-[#00C6FF]/30 hover:bg-[#00C6FF]/90 hover:scale-[1.01] active:scale-95 cursor-pointer'
                     : 'bg-[#B3A2DB]/25 text-[#5E2CB2]/40 cursor-not-allowed'
                 }`}
               >
-                <span>CONTINUE TO CHECKOUT</span>
+                <span>BOOK RESERVATION</span>
                 {selectedSlots.length > 0 && <ArrowRight className="h-4 w-4 stroke-[3]" />}
               </button>
             </div>
@@ -518,29 +518,6 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
         </div>
       </div>
 
-      {/* Sticky Mobile Bottom Checkout Bar (Thumb friendly for mobile viewports) */}
-      {selectedSlots.length > 0 && (
-        <div className="fixed bottom-0 inset-x-0 z-40 block lg:hidden bg-[#5E2CB2]/95 backdrop-blur-md border-t-2 border-[#00C6FF] shadow-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] animate-in slide-in-from-bottom duration-200">
-          <div className="max-w-md mx-auto flex items-center justify-between gap-3">
-            <div className="flex flex-col min-w-0">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-[#00C6FF] truncate">
-                {selectedSlots.length} {selectedSlots.length === 1 ? 'Slot' : 'Slots'} Selected
-              </span>
-              <span className="font-heading text-xl font-black text-white leading-none">
-                ₱{totalPrice}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={onProceedToCheckout}
-              className="flex-1 max-w-[230px] rounded-xl bg-[#00C6FF] py-3.5 px-4 text-center text-xs font-black uppercase tracking-wider text-black shadow-lg shadow-[#00C6FF]/30 active:scale-95 cursor-pointer flex items-center justify-center gap-1.5 min-h-[48px]"
-            >
-              <span>Checkout</span>
-              <ArrowRight className="h-4 w-4 stroke-[3]" />
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Pop-up Calendar */}
       <CalendarPopup

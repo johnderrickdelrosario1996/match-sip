@@ -81,7 +81,7 @@ export default function App() {
   const [confirmedBooking, setConfirmedBooking] = useState<ConfirmedBooking | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Cloud SQL Real-time Persistence State
+  // Supabase Real-time Persistence State
   const [persistedBookings, setPersistedBookings] = useState<ConfirmedBooking[]>(() => {
     return getInitialCachedBookings();
   });
@@ -134,10 +134,10 @@ export default function App() {
     }, 3500);
   }, []);
 
-  // When returning online after a network drop, re-validate selected slots against live Cloud SQL
+  // When returning online after a network drop, re-validate selected slots against live Supabase
   useEffect(() => {
     if (wasOffline && isOnline) {
-      showToast('⚡ Back online! Re-validating slot availability with Cloud SQL...');
+      showToast('⚡ Back online! Re-validating slot availability with Supabase...');
       if (selectedSlots.length > 0) {
         validateSlotsLiveAvailability(selectedSlots, selectedDate)
           .then((check) => {
@@ -159,7 +159,7 @@ export default function App() {
     }
   }, [wasOffline, isOnline, selectedDate, selectedSlots, showToast]);
 
-  // Real-time synchronization with Cloud SQL
+  // Real-time synchronization with Supabase
   useEffect(() => {
     const unsubscribe = subscribeToBookings(
       (bookings) => {
@@ -167,7 +167,7 @@ export default function App() {
         setIsLoadingBookings(false);
       },
       (error) => {
-        console.warn('Cloud SQL database sync notice:', error);
+        console.warn('Supabase database sync notice:', error);
         setIsLoadingBookings(false);
       }
     );
@@ -257,7 +257,7 @@ export default function App() {
 
   const handleBookingComplete = useCallback(async (booking: ConfirmedBooking) => {
     try {
-      // 1. Atomic commit to Cloud SQL with court slot locks
+      // 1. Atomic commit to Supabase with court slot locks
       await saveBookingToFirestore(booking);
 
       // 2. On atomic commit success: update state, clear cached selection and draft
@@ -269,7 +269,7 @@ export default function App() {
       } catch {}
       showToast(`Reservation #${booking.bookingReference} confirmed!`);
     } catch (error: any) {
-      console.error('Error saving to Cloud SQL:', error);
+      console.error('Error saving to Supabase:', error);
       if (error?.message && error.message.includes('DOUBLE_BOOKING_PREVENTED')) {
         showToast('⚠️ Slot conflict: This court hour was just booked by another player.');
         throw error;

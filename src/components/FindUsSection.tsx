@@ -1,7 +1,28 @@
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { MapPin, Clock, Phone, Mail, Navigation, ExternalLink } from 'lucide-react';
 
 export const FindUsSection: React.FC = () => {
+  const sectionRef = useRef<HTMLElement>(null);
+  const [shouldLoadMap, setShouldLoadMap] = useState<boolean>(false);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setShouldLoadMap(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '300px' }
+    );
+
+    if (sectionRef.current) {
+      observer.observe(sectionRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, []);
+
   // Exact GPS Coordinates: 6°09'54.0"N 125°09'31.6"E (6.165000, 125.158778)
   const coordinatesDms = `6°09'54.0"N 125°09'31.6"E`;
   const latitude = 6.165;
@@ -15,6 +36,7 @@ export const FindUsSection: React.FC = () => {
 
   return (
     <section
+      ref={sectionRef}
       id="find-us"
       className="relative w-full border-t border-[#B3A2DB]/30 bg-[#5E2CB2] py-16 sm:py-20 text-[#FFFFFF] overflow-hidden"
     >
@@ -181,17 +203,26 @@ export const FindUsSection: React.FC = () => {
                 <span className="text-[11px] text-[#FFFFFF]/90 font-mono hidden sm:inline">{coordinatesDms}</span>
               </div>
 
-              {/* Interactive Google Map iframe */}
-              <iframe
-                title="Match&Sip Pin Location Map - 6°09'54.0&quot;N 125°09'31.6&quot;E"
-                src={embedMapUrl}
-                width="100%"
-                height="100%"
-                className="w-full h-full min-h-[360px] sm:min-h-[420px] rounded-2xl border-0 filter contrast-[105%] saturate-[110%]"
-                allowFullScreen={true}
-                loading="lazy"
-                referrerPolicy="no-referrer-when-downgrade"
-              />
+              {/* Interactive Google Map iframe (deferred until scrolled into view) */}
+              {shouldLoadMap ? (
+                <iframe
+                  title="Match&Sip Pin Location Map - 6°09'54.0&quot;N 125°09'31.6&quot;E"
+                  src={embedMapUrl}
+                  width="100%"
+                  height="100%"
+                  className="w-full h-full min-h-[360px] sm:min-h-[420px] rounded-2xl border-0 filter contrast-[105%] saturate-[110%]"
+                  allowFullScreen={true}
+                  loading="lazy"
+                  referrerPolicy="no-referrer-when-downgrade"
+                />
+              ) : (
+                <div className="w-full h-full min-h-[360px] sm:min-h-[420px] rounded-2xl flex flex-col items-center justify-center bg-black/30 p-6 text-center">
+                  <div className="h-8 w-8 rounded-full border-2 border-[#00C6FF] border-t-transparent animate-spin mb-3" />
+                  <span className="text-xs font-bold uppercase tracking-widest text-[#00C6FF]">
+                    Loading Venue Map...
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>

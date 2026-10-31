@@ -894,7 +894,7 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
             <RefreshCw className="h-8 w-8 animate-spin text-[#00C6FF]" />
 
             <span className="text-sm font-bold text-[#B3A2DB]">
-              Loading confirmed reservations from Cloud SQL...
+              Loading confirmed reservations from Supabase...
             </span>
 
           </div>

@@ -1,9 +1,30 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Database migrated to Cloud SQL PostgreSQL. Lock down Firestore.
+    // Default catch-all
     match /{document=**} {
       allow read, write: if false;
+    }
+
+    // Court reservations collection
+    match /bookings/{bookingId} {
+      // Anyone can read bookings to show open vs booked slots in Live Court Matrix
+      allow read: if true;
+      // Anyone can create a reservation
+      allow create: if true;
+      // Allow updating and deleting bookings for admin and reservation management
+      allow update, delete: if true;
+    }
+
+    // Atomic court slot locks
+    match /courtSlotLocks/{lockId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // Security audit and visitor analytics
+    match /visitorAnalytics/{logId} {
+      allow read, write: if true;
     }
   }
 }

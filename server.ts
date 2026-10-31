@@ -28,11 +28,15 @@ import {
   deleteAnalyticsLogById,
   clearAllAnalyticsLogs,
 } from './src/db/analytics.ts';
+import { isSupabaseConfigured } from './src/lib/supabase.ts';
 
 dotenv.config({ override: true });
 
 const app = express();
 const PORT = 3000;
+const SERVER_BOOT_TIME = Date.now();
+const APP_VERSION = '1.2.0';
+
 // Strictly lock admin notifications exclusively to danamieratan@gmail.com
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'danamieratan@gmail.com';
 
@@ -45,6 +49,33 @@ app.use(
     },
   })
 );
+
+// Malformed JSON payload syntax error guard
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err instanceof SyntaxError && (err as any).status === 400 && 'body' in err) {
+    return res.status(400).json({ success: false, error: 'Malformed JSON payload.' });
+  }
+  next(err);
+});
+
+// Aggressive Cache-Control headers for all dynamic API endpoints
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  next();
+});
+
+// App Version & Deployment Check Endpoint (for client force-refresh detection)
+app.get(['/api/version', '/version.json'], (_req, res) => {
+  res.json({
+    version: APP_VERSION,
+    buildTime: SERVER_BOOT_TIME,
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date(SERVER_BOOT_TIME).toISOString(),
+  });
+});
 
 // Lazy Resend client initialization with dynamic key tracking
 let cachedApiKey = '';
@@ -303,9 +334,14 @@ app.get('/api/health', (req, res) => {
   const currentFrom = process.env.RESEND_FROM_EMAIL?.trim() || 'MATCH and SIP <onboarding@resend.dev>';
   const paymongoKey = process.env.PAYMONGO_SECRET_KEY?.trim();
   const webhookKey = process.env.PAYMONGO_WEBHOOK_SECRET_KEY?.trim();
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = process.env.SUPABASE_ANON_KEY?.trim();
 
   res.json({
     status: 'ok',
+    supabaseConfigured: isSupabaseConfigured,
+    supabaseUrlConfigured: !!supabaseUrl,
+    maskedSupabaseKey: getMaskedKey(supabaseKey),
     resendConfigured: !!currentKey,
     activeSender: currentFrom,
     maskedApiKey: getMaskedKey(currentKey),
@@ -333,7 +369,7 @@ app.post('/api/notify-admin', async (req, res) => {
 });
 
 /**
- * Cloud SQL & Firebase Auth User Endpoints
+ * Supabase & Firebase Auth User Endpoints
  */
 app.get('/api/users', requireAuth, async (req: AuthRequest, res) => {
   try {
@@ -361,9 +397,9 @@ app.post('/api/users/sync', requireAuth, async (req: AuthRequest, res) => {
 });
 
 /**
- * Cloud SQL Bookings API
+ * Supabase Bookings API (supports both /api/bookings and legacy /api/sql/bookings)
  */
-app.get('/api/sql/bookings', bookingsReadLimiter(120, 60000), async (req, res) => {
+app.get(['/api/bookings', '/api/sql/bookings'], bookingsReadLimiter(120, 60000), async (req, res) => {
   try {
     const limitCount = req.query.limit ? Number(req.query.limit) : 250;
     const date = req.query.date as string | undefined;
@@ -375,12 +411,12 @@ app.get('/api/sql/bookings', bookingsReadLimiter(120, 60000), async (req, res) =
     }
     res.json({ success: true, bookings: results });
   } catch (error: any) {
-    console.error('Failed to fetch bookings from Cloud SQL:', error);
+    console.error('Failed to fetch bookings from Supabase:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch bookings' });
   }
 });
 
-app.get('/api/sql/bookings/:reference', bookingsReadLimiter(120, 60000), async (req, res) => {
+app.get(['/api/bookings/:reference', '/api/sql/bookings/:reference'], bookingsReadLimiter(120, 60000), async (req, res) => {
   try {
     const { reference } = req.params;
     const booking = await getBookingByReference(reference);
@@ -389,13 +425,13 @@ app.get('/api/sql/bookings/:reference', bookingsReadLimiter(120, 60000), async (
     }
     res.json({ success: true, booking });
   } catch (error: any) {
-    console.error('Failed to fetch booking from Cloud SQL:', error);
+    console.error('Failed to fetch booking from Supabase:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch booking' });
   }
 });
 
 app.post(
-  '/api/sql/bookings',
+  ['/api/bookings', '/api/sql/bookings'],
   bookingsWriteLimiter(20, 60000),
   duplicateBookingProtection,
   async (req, res) => {
@@ -415,14 +451,14 @@ app.post(
 
       res.json({ success: true, booking: result });
     } catch (error: any) {
-      console.error('Failed to save booking to Cloud SQL:', error);
+      console.error('Failed to save booking to Supabase:', error);
       const isConflict = error?.message?.includes('DOUBLE_BOOKING_PREVENTED');
       res.status(isConflict ? 409 : 500).json({ error: error.message || 'Failed to save booking' });
     }
   }
 );
 
-app.put('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), async (req, res) => {
+app.put(['/api/bookings/:reference', '/api/sql/bookings/:reference'], bookingsWriteLimiter(20, 60000), async (req, res) => {
   try {
     const { reference } = req.params;
     const updates = req.body;
@@ -440,12 +476,12 @@ app.put('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), async (
 
     res.json({ success: true, booking: updated });
   } catch (error: any) {
-    console.error('Failed to update booking in Cloud SQL:', error);
+    console.error('Failed to update booking in Supabase:', error);
     res.status(500).json({ error: error.message || 'Failed to update booking' });
   }
 });
 
-app.delete('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), async (req, res) => {
+app.delete(['/api/bookings/:reference', '/api/sql/bookings/:reference'], bookingsWriteLimiter(20, 60000), async (req, res) => {
   try {
     const { reference } = req.params;
     const deleted = await deleteBookingByReference(reference);
@@ -459,7 +495,7 @@ app.delete('/api/sql/bookings/:reference', bookingsWriteLimiter(20, 60000), asyn
 
     res.json({ success: true, deletedBooking: deleted });
   } catch (error: any) {
-    console.error('Failed to delete booking in Cloud SQL:', error);
+    console.error('Failed to delete booking in Supabase:', error);
     res.status(500).json({ error: error.message || 'Failed to delete booking' });
   }
 });
@@ -586,7 +622,7 @@ app.post(
       process.env.APP_URL?.replace(/\/$/, '') ||
       `${protocol}://${host}`;
 
-    // Secure the reservation with initial status 'PENDING' in Cloud SQL
+    // Secure the reservation with initial status 'PENDING' in Supabase
     try {
       await saveBookingWithLocks({
         bookingReference,
@@ -608,7 +644,7 @@ app.post(
         status: 'PENDING',
       });
     } catch (sqlErr) {
-      console.warn('[MATCH&SIP] Initial booking setup in Cloud SQL notice:', sqlErr);
+      console.warn('[MATCH&SIP] Initial booking setup in Supabase notice:', sqlErr);
     }
 
     const paymongoSecretKey = process.env.PAYMONGO_SECRET_KEY?.trim();
@@ -827,7 +863,7 @@ app.post('/api/webhooks/payment', async (req: any, res) => {
 
     console.log(`[MATCH&SIP] Payment confirmed for booking reference: #${bookingReference}`);
 
-    // Automatically update reservation status in Cloud SQL to 'BOOKED'
+    // Automatically update reservation status in Supabase to 'BOOKED'
     await updateBookingFields(bookingReference, {
       status: 'BOOKED',
       paymentMethod: 'GCash (PayMongo)',
@@ -849,7 +885,7 @@ app.post('/api/webhooks/payment', async (req: any, res) => {
       });
     }
 
-    console.log(`[MATCH&SIP] Booking #${bookingReference} successfully updated to BOOKED in Cloud SQL.`);
+    console.log(`[MATCH&SIP] Booking #${bookingReference} successfully updated to BOOKED in Supabase.`);
 
     return res.status(200).json({
       received: true,
@@ -899,7 +935,7 @@ app.post('/api/payment/simulate-pay', async (req, res) => {
       success: true,
       status: 'BOOKED',
       bookingReference,
-      message: `Reservation #${bookingReference} status updated to BOOKED in Cloud SQL.`,
+      message: `Reservation #${bookingReference} status updated to BOOKED in Supabase.`,
     });
   } catch (err: any) {
     console.error('[MATCH&SIP] Error simulating payment:', err);
@@ -999,6 +1035,17 @@ app.post('/api/test-email', async (req, res) => {
   }
 });
 
+// Global unhandled error handler middleware
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[UNHANDLED SERVER ERROR]', err);
+  if (!res.headersSent) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error occurred.',
+    });
+  }
+});
+
 async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
@@ -1009,8 +1056,25 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    // Aggressive Cache-Busting: Hashed assets are immutable for 1 year;
+    // index.html, version.json, and root assets must revalidate immediately.
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.includes(`${path.sep}assets${path.sep}`) || filePath.includes('/assets/')) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          } else {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, proxy-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+          }
+        },
+      })
+    );
+    app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

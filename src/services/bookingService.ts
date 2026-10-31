@@ -41,6 +41,17 @@ export function getCachedBookings(): ConfirmedBooking[] | null {
   return disk.length > 0 ? disk : inMemoryBookingsCache;
 }
 
+export function clearBookingsCache(): void {
+  inMemoryBookingsCache = null;
+  lastCacheTimestamp = 0;
+  try {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(LOCAL_STORAGE_CACHE_KEY);
+      localStorage.removeItem('matchsip_bookings_cache');
+    }
+  } catch {}
+}
+
 export function setCachedBookings(bookings: ConfirmedBooking[]): void {
   inMemoryBookingsCache = bookings;
   lastCacheTimestamp = Date.now();
@@ -111,33 +122,44 @@ export function toCanonicalSlotId(courtId: string, timeLabel: string): string {
 }
 
 /**
- * Convert Cloud SQL row to frontend ConfirmedBooking interface
+ * Convert database row (from Supabase or backend API) to frontend ConfirmedBooking interface
  */
 export function mapSqlRowToBooking(row: any): ConfirmedBooking {
+  const ref = row.booking_reference ?? row.bookingReference ?? String(row.id || '');
   return {
-    id: row.bookingReference || String(row.id),
-    bookingReference: row.bookingReference,
-    selectedDate: row.selectedDate,
-    paymentMethod: row.paymentMethod || 'GCash (PayMongo)',
+    id: ref || String(row.id),
+    bookingReference: ref,
+    selectedDate: row.selected_date ?? row.selectedDate ?? '',
+    paymentMethod: row.payment_method ?? row.paymentMethod ?? 'GCash (PayMongo)',
     customer: {
-      fullName: row.customerName || '',
-      phoneNumber: row.customerPhone || '',
-      email: row.customerEmail || '',
-      notes: row.customerNotes || '',
+      fullName: row.customer_name ?? row.customerName ?? (row.customer?.fullName || ''),
+      phoneNumber: row.customer_phone ?? row.customerPhone ?? (row.customer?.phoneNumber || ''),
+      email: row.customer_email ?? row.customerEmail ?? (row.customer?.email || ''),
+      notes: row.customer_notes ?? row.customerNotes ?? (row.customer?.notes || ''),
     },
-    slots: Array.isArray(row.slots) ? row.slots : [],
-    totalAmount: Number(row.totalAmount) || 0,
-    paymentProofUrl: row.paymentProofUrl || '',
+    slots: Array.isArray(row.slots)
+      ? row.slots
+      : typeof row.slots === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(row.slots);
+          } catch {
+            return [];
+          }
+        })()
+      : [],
+    totalAmount: Number(row.total_amount ?? row.totalAmount) || 0,
+    paymentProofUrl: row.payment_proof_url ?? row.paymentProofUrl ?? '',
     status: row.status || 'BOOKED',
-    confirmedAt: row.confirmedAt || (row.createdAt ? new Date(row.createdAt).toISOString() : ''),
-    createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : (row.confirmedAt || ''),
-    bookedAt: row.bookedAt || (row.createdAt ? new Date(row.createdAt).toISOString() : ''),
+    confirmedAt: row.confirmed_at ?? row.confirmedAt ?? (row.created_at || row.createdAt ? new Date(row.created_at || row.createdAt).toISOString() : ''),
+    createdAt: row.created_at || row.createdAt ? new Date(row.created_at || row.createdAt).toISOString() : (row.confirmed_at || row.confirmedAt || ''),
+    bookedAt: row.booked_at ?? row.bookedAt ?? (row.created_at || row.createdAt ? new Date(row.created_at || row.createdAt).toISOString() : ''),
   };
 }
 
 /**
  * Live pre-checkout / pre-submission slot availability verification.
- * Directly checks live Cloud SQL bookings for the target date to prevent double bookings.
+ * Directly checks live Supabase bookings for the target date to prevent double bookings.
  */
 export async function validateSlotsLiveAvailability(
   slots: SelectedSlot[],
@@ -149,7 +171,7 @@ export async function validateSlotsLiveAvailability(
   }
 
   try {
-    const res = await fetch(`/api/sql/bookings?date=${encodeURIComponent(dateStr)}`);
+    const res = await fetch(`/api/bookings?date=${encodeURIComponent(dateStr)}`);
     if (!res.ok) {
       return { isAvailable: true };
     }
@@ -241,7 +263,7 @@ export async function saveBookingToFirestore(booking: ConfirmedBooking): Promise
     bookedAt,
   };
 
-  const res = await fetch('/api/sql/bookings', {
+  const res = await fetch('/api/bookings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -273,13 +295,13 @@ export async function saveBookingToFirestore(booking: ConfirmedBooking): Promise
 }
 
 /**
- * Delete a booking and release its locks from Cloud SQL.
+ * Delete a booking and release its locks from Supabase.
  */
 export async function deleteBookingFromFirestore(bookingId: string): Promise<void> {
   if (!bookingId) throw new Error('Missing booking ID for deletion');
   const cleanId = bookingId.trim();
 
-  const res = await fetch(`/api/sql/bookings/${encodeURIComponent(cleanId)}`, {
+  const res = await fetch(`/api/bookings/${encodeURIComponent(cleanId)}`, {
     method: 'DELETE',
   });
 
@@ -298,7 +320,7 @@ export async function deleteBookingFromFirestore(bookingId: string): Promise<voi
 }
 
 /**
- * Update an existing booking in Cloud SQL.
+ * Update an existing booking in Supabase.
  */
 export async function updateBookingInFirestore(
   bookingId: string,
@@ -342,7 +364,7 @@ export async function updateBookingInFirestore(
   if (updates.totalAmount !== undefined) payload.totalAmount = Number(updates.totalAmount) || 0;
   if (cleanSlots !== undefined) payload.slots = cleanSlots;
 
-  const res = await fetch(`/api/sql/bookings/${encodeURIComponent(cleanId)}`, {
+  const res = await fetch(`/api/bookings/${encodeURIComponent(cleanId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -379,7 +401,7 @@ export async function updateBookingInFirestore(
 }
 
 /**
- * Consolidate updates across multiple bookings into Cloud SQL.
+ * Consolidate updates across multiple bookings into Supabase.
  */
 export async function batchUpdateBookingsInFirestore(
   bookingUpdates: Array<{
@@ -403,7 +425,7 @@ export async function batchUpdateBookingsInFirestore(
 }
 
 /**
- * Real-time subscription to court reservations in Cloud SQL via periodic polling and instant cache delivery.
+ * Real-time subscription to court reservations in Supabase via periodic polling and instant cache delivery.
  */
 export function subscribeToBookings(
   onBookingsUpdated: (bookings: ConfirmedBooking[]) => void,
@@ -421,8 +443,8 @@ export function subscribeToBookings(
 
   const fetchBookings = async () => {
     try {
-      const res = await fetch(`/api/sql/bookings?limit=${maxLimit}`);
-      if (!res.ok) throw new Error('Failed to fetch bookings from Cloud SQL');
+      const res = await fetch(`/api/bookings?limit=${maxLimit}`);
+      if (!res.ok) throw new Error('Failed to fetch bookings from Supabase');
       const data = await res.json();
       if (!isMounted) return;
 
@@ -431,7 +453,7 @@ export function subscribeToBookings(
       onBookingsUpdated(items);
     } catch (err: any) {
       if (!isMounted) return;
-      console.warn('Cloud SQL bookings fetch notice:', err);
+      console.warn('Supabase bookings fetch notice:', err);
       if (onError) onError(err);
     }
   };
