@@ -11,13 +11,14 @@ import {
   Cloud,
   Loader2,
   RefreshCw,
-  ChevronDown
+  ChevronDown,
+  Clock
 } from 'lucide-react';
 import { SelectedSlot, ConfirmedBooking } from '../types';
 import qrCodeImg from '../assets/images/INSTAPAY QR CODE.jpg';
 import paddleUpImg from '../assets/images/Paddleup.jpg';
 import { uploadReceiptToFirebaseStorage, compressImageToBase64, validateReceiptFile } from '../services/storageService';
-import { validateSlotsLiveAvailability } from '../services/bookingService';
+import { validateSlotsLiveAvailability, holdSlotsLive, releaseSlotsHoldLive } from '../services/bookingService';
 import { getTodayDateString } from '../utils/dateUtils';
 
 interface RapidCheckoutProps {
@@ -52,12 +53,12 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
   onBookingComplete,
   onNavigateToMatrix,
 }) => {
-  // Restore draft inputs from local storage so network flickers don't lose typed data
+  // Restore draft inputs from sessionStorage (with fallback to localStorage)
   const [fullName, setFullName] = useState<string>(() => {
     try {
-      const draft = localStorage.getItem('matchsip_checkout_draft');
-      if (draft) {
-        const parsed = JSON.parse(draft);
+      const raw = sessionStorage.getItem('matchsip_checkout_draft') || localStorage.getItem('matchsip_checkout_draft');
+      if (raw) {
+        const parsed = JSON.parse(raw);
         return parsed.fullName || '';
       }
     } catch {}
@@ -66,16 +67,25 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
 
   const [phoneNumber, setPhoneNumber] = useState<string>(() => {
     try {
-      const draft = localStorage.getItem('matchsip_checkout_draft');
-      if (draft) {
-        const parsed = JSON.parse(draft);
+      const raw = sessionStorage.getItem('matchsip_checkout_draft') || localStorage.getItem('matchsip_checkout_draft');
+      if (raw) {
+        const parsed = JSON.parse(raw);
         return parsed.phoneNumber || '';
       }
     } catch {}
     return '';
   });
 
-  const [safetyAgreed, setSafetyAgreed] = useState(false);
+  const [safetyAgreed, setSafetyAgreed] = useState<boolean>(() => {
+    try {
+      const raw = sessionStorage.getItem('matchsip_checkout_draft') || localStorage.getItem('matchsip_checkout_draft');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return Boolean(parsed.safetyAgreed);
+      }
+    } catch {}
+    return false;
+  });
   const [showSafetyModal, setShowSafetyModal] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showReceiptPreviewModal, setShowReceiptPreviewModal] = useState(false);
@@ -116,15 +126,73 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
     }
   };
 
-  // Sync draft to local storage so connection drops keep user input safe
+  // Sync draft inputs to sessionStorage and localStorage for graceful refresh preservation
   useEffect(() => {
     try {
-      localStorage.setItem(
-        'matchsip_checkout_draft',
-        JSON.stringify({ fullName, phoneNumber })
-      );
+      const payload = JSON.stringify({ fullName, phoneNumber, safetyAgreed });
+      sessionStorage.setItem('matchsip_checkout_draft', payload);
+      localStorage.setItem('matchsip_checkout_draft', payload);
     } catch {}
-  }, [fullName, phoneNumber]);
+  }, [fullName, phoneNumber, safetyAgreed]);
+
+  // Stable booking reference for this checkout session and 5-minute TTL slot hold (Mechanism 3)
+  const [draftBookingRef] = useState<string>(() => {
+    try {
+      const stored = sessionStorage.getItem('matchsip_draft_ref');
+      if (stored) return stored;
+    } catch {}
+    const newRef = `MS-${Math.floor(100000 + Math.random() * 900000)}`;
+    try {
+      sessionStorage.setItem('matchsip_draft_ref', newRef);
+    } catch {}
+    return newRef;
+  });
+
+  const [holdExpiresAt, setHoldExpiresAt] = useState<number | null>(null);
+  const [holdRemainingSeconds, setHoldRemainingSeconds] = useState<number>(300);
+  const [isSlotHeld, setIsSlotHeld] = useState<boolean>(false);
+
+  // Automatically acquire 5-minute temporary slot hold when entering checkout with selected slots
+  useEffect(() => {
+    if (selectedSlots.length === 0) {
+      setIsSlotHeld(false);
+      setHoldExpiresAt(null);
+      return;
+    }
+
+    let isMounted = true;
+    holdSlotsLive(draftBookingRef, selectedDate, selectedSlots, fullName, 300).then((res) => {
+      if (!isMounted) return;
+      if (res.success) {
+        setIsSlotHeld(true);
+        const expires = Date.now() + 300 * 1000;
+        setHoldExpiresAt(expires);
+        setHoldRemainingSeconds(300);
+        setErrorMessage(null);
+      } else if (res.conflictReason) {
+        setIsSlotHeld(false);
+        setErrorMessage(res.conflictReason);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedSlots, selectedDate, draftBookingRef]);
+
+  // Countdown timer for TTL hold
+  useEffect(() => {
+    if (!holdExpiresAt) return;
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, Math.round((holdExpiresAt - Date.now()) / 1000));
+      setHoldRemainingSeconds(remaining);
+      if (remaining === 0) {
+        clearInterval(interval);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [holdExpiresAt]);
 
   // Payment receipt states
   const [proofImage, setProofImage] = useState<string | null>(null);
@@ -372,7 +440,7 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
         throw new Error('Payment receipt screenshot proof is required.');
       }
 
-      const bookingRef = `MS-${Math.floor(100000 + Math.random() * 900000)}`;
+      const bookingRef = draftBookingRef || `MS-${Math.floor(100000 + Math.random() * 900000)}`;
       const nowIso = new Date().toISOString();
       const newBooking: ConfirmedBooking = {
         bookingReference: bookingRef,
@@ -402,6 +470,8 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
       removeProof();
       setIsNetworkFailure(false);
       try {
+        sessionStorage.removeItem('matchsip_draft_ref');
+        sessionStorage.removeItem('matchsip_checkout_draft');
         localStorage.removeItem('matchsip_checkout_draft');
       } catch {}
     } catch (err: unknown) {
@@ -523,6 +593,30 @@ export const RapidCheckout: React.FC<RapidCheckoutProps> = ({
                 YOUR SERVE
               </h2>
             </div>
+
+            {/* 5-minute TTL Hold Banner (Mechanism 3) */}
+            {selectedSlots.length > 0 && isSlotHeld && holdRemainingSeconds > 0 && (
+              <div className="flex items-center justify-between rounded-xl bg-amber-500/15 border border-amber-400/40 px-4 py-3 text-xs text-amber-200 shadow-sm">
+                <div className="flex items-center gap-2.5">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-400"></span>
+                  </span>
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <Clock className="h-4 w-4 text-amber-300" />
+                    <span>Courts locked exclusively for you:</span>
+                  </div>
+                </div>
+                <span className="font-mono font-bold text-amber-300 text-sm tracking-wider">
+                  {Math.floor(holdRemainingSeconds / 60)}:{(holdRemainingSeconds % 60).toString().padStart(2, '0')}
+                </span>
+              </div>
+            )}
+            {selectedSlots.length > 0 && isSlotHeld && holdRemainingSeconds === 0 && (
+              <div className="flex items-center justify-between rounded-xl bg-rose-500/20 border border-rose-400/40 px-4 py-3 text-xs text-rose-200">
+                <span className="font-medium">Your 5-minute hold has expired. Please re-select your slots or finalize now.</span>
+              </div>
+            )}
 
             {/* Checkout Form */}
             <form onSubmit={handleSubmit} className="space-y-4">

@@ -59,6 +59,7 @@ export function normalizeBookingRow(row: any) {
     status: row.status || 'BOOKED',
     confirmedAt: row.confirmed_at ?? row.confirmedAt ?? '',
     bookedAt: row.booked_at ?? row.bookedAt ?? '',
+    expiresAt: row.expires_at ?? row.expiresAt ?? '',
     createdAt: row.created_at ?? row.createdAt ?? '',
     updatedAt: row.updated_at ?? row.updatedAt ?? '',
   };
@@ -140,7 +141,98 @@ export async function getBookingsByDate(selectedDate: string) {
       throw new Error(error.message || 'Database query by date failed.');
     }
 
-    return (data || []).map(normalizeBookingRow);
+    const confirmedBookings = (data || []).map(normalizeBookingRow);
+
+    // Query active unexpired temporary slot holds (TTL 5 minutes)
+    try {
+      const nowIso = new Date().toISOString();
+      const { data: activeHolds, error: holdsErr } = await supabase
+        .from('court_slot_locks')
+        .select('*')
+        .eq('date', selectedDate)
+        .eq('status', 'HELD')
+        .gt('expires_at', nowIso);
+
+      if (!holdsErr && activeHolds && activeHolds.length > 0) {
+        const existingRefs = new Set(confirmedBookings.map((b: any) => b.bookingReference));
+        const holdBookings = activeHolds
+          .filter((h: any) => !existingRefs.has(h.booking_reference))
+          .map((h: any) => ({
+            id: h.id,
+            bookingReference: h.booking_reference || 'HELD',
+            selectedDate: h.date,
+            paymentMethod: 'In Checkout Hold',
+            customerName: h.customer_name || 'Player in Checkout',
+            customerPhone: '',
+            customerEmail: '',
+            customerNotes: '',
+            slots: [{
+              slotId: h.lock_id,
+              courtId: h.court_id,
+              courtName: h.court_name,
+              timeLabel: h.time_label,
+              date: h.date,
+              price: 0,
+            }],
+            totalAmount: 0,
+            paymentProofUrl: '',
+            status: 'HELD',
+            confirmedAt: '',
+            bookedAt: h.locked_at || '',
+            expiresAt: h.expires_at || '',
+            createdAt: h.created_at || '',
+            updatedAt: h.created_at || '',
+          }));
+
+        confirmedBookings.push(...holdBookings);
+      }
+    } catch {}
+
+    // Merge active in-memory holds (instant sub-millisecond propagation)
+    cleanExpiredMemoryLocks();
+    const existingRefs = new Set(confirmedBookings.map((b: any) => b.bookingReference));
+    const now = Date.now();
+
+    for (const lock of memoryLocks.values()) {
+      if (
+        lock.selectedDate === selectedDate &&
+        lock.status === 'HELD' &&
+        lock.expiresAt &&
+        lock.expiresAt > now &&
+        !existingRefs.has(lock.bookingReference)
+      ) {
+        confirmedBookings.push({
+          id: lock.lockId,
+          bookingReference: lock.bookingReference,
+          selectedDate: lock.selectedDate,
+          paymentMethod: 'In Checkout Hold',
+          customerName: lock.customerName || 'Player in Checkout',
+          customerPhone: '',
+          customerEmail: '',
+          customerNotes: '',
+          slots: [
+            {
+              slotId: lock.lockId,
+              courtId: lock.courtId,
+              courtName: lock.courtName,
+              timeLabel: lock.timeLabel,
+              date: lock.selectedDate,
+              price: 0,
+            },
+          ],
+          totalAmount: 0,
+          paymentProofUrl: '',
+          status: 'HELD',
+          confirmedAt: '',
+          bookedAt: lock.lockedAt,
+          expiresAt: new Date(lock.expiresAt).toISOString(),
+          createdAt: lock.lockedAt,
+          updatedAt: lock.lockedAt,
+        });
+      }
+    }
+
+    return confirmedBookings;
   } catch (error: any) {
     if (isTableMissingError(error)) {
       warnTableMissingOnce();
@@ -196,6 +288,263 @@ export async function getBookingByReference(bookingReference: string) {
   }
 }
 
+interface MemoryLock {
+  lockId: string;
+  bookingReference: string;
+  customerName: string;
+  selectedDate: string;
+  courtId: string;
+  courtName: string;
+  timeLabel: string;
+  status: 'HELD' | 'BOOKED';
+  lockedAt: string;
+  expiresAt: number | null; // epoch ms
+}
+
+const memoryLocks = new Map<string, MemoryLock>();
+
+function cleanExpiredMemoryLocks() {
+  const now = Date.now();
+  for (const [key, lock] of memoryLocks.entries()) {
+    if (lock.status === 'HELD' && lock.expiresAt && lock.expiresAt <= now) {
+      memoryLocks.delete(key);
+    }
+  }
+}
+
+/**
+ * Atomic Slot Lock Transaction (Mechanisms 1, 2, and 3):
+ * 1. Database-Level Unique Constraint (unique_court_time_slot)
+ * 2. Row-Level Transaction Locking (SELECT ... FOR UPDATE via claim_court_slots RPC)
+ * 3. Short-Lived TTL Hold Support (5-minute hold for in-progress checkout)
+ */
+export async function claimSlotsTransaction(
+  bookingReference: string,
+  customerName: string,
+  selectedDate: string,
+  slots: any[],
+  isTempHold = false,
+  holdTtlSeconds = 300
+) {
+  cleanExpiredMemoryLocks();
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const expiresAtMs = isTempHold ? Date.now() + holdTtlSeconds * 1000 : null;
+  const expiresAtIso = expiresAtMs ? new Date(expiresAtMs).toISOString() : null;
+  const status = isTempHold ? 'HELD' : 'BOOKED';
+
+  // Step 1: Sub-millisecond Memory Lock & Race Guard
+  for (const slot of slots) {
+    const timeLabel = slot.timeLabel || '';
+    const match = timeLabel.match(/(\d{1,2}):(\d{2})/);
+    const timeKey = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
+    const cleanCourt = (slot.courtId || 'court-1').toLowerCase().trim();
+    const dateStr = (slot.date || selectedDate || '').trim();
+    const lockId = `${dateStr}_${cleanCourt}_${timeKey}`;
+
+    const existing = memoryLocks.get(lockId);
+    if (existing) {
+      if (existing.status === 'BOOKED' && existing.bookingReference !== bookingReference) {
+        throw new Error(
+          `DOUBLE_BOOKING_PREVENTED: Slot "${slot.courtName || 'Court'} (${slot.timeLabel || ''})" is already booked by another player (#${existing.bookingReference}).`
+        );
+      }
+      if (
+        existing.status === 'HELD' &&
+        existing.expiresAt &&
+        existing.expiresAt > Date.now() &&
+        existing.bookingReference !== bookingReference
+      ) {
+        throw new Error(
+          `SLOT_HELD_IN_PROGRESS: Slot "${slot.courtName || 'Court'} (${slot.timeLabel || ''})" is currently in checkout by another player. Please try again shortly.`
+        );
+      }
+    }
+  }
+
+  // Step 2: Supabase Stored Procedure RPC with atomic SELECT ... FOR UPDATE (if configured)
+  if (isSupabaseConfigured) {
+    try {
+      const { data: rpcResult, error: rpcError } = await supabase.rpc('claim_court_slots', {
+        p_booking_reference: bookingReference,
+        p_customer_name: customerName,
+        p_selected_date: selectedDate,
+        p_slots: slots,
+        p_is_temp_hold: isTempHold,
+        p_hold_ttl_seconds: holdTtlSeconds,
+      });
+
+      if (!rpcError && rpcResult?.success) {
+        // Register into memory locks as well
+        for (const slot of slots) {
+          const timeLabel = slot.timeLabel || '';
+          const match = timeLabel.match(/(\d{1,2}):(\d{2})/);
+          const timeKey = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
+          const cleanCourt = (slot.courtId || 'court-1').toLowerCase().trim();
+          const dateStr = (slot.date || selectedDate || '').trim();
+          const lockId = `${dateStr}_${cleanCourt}_${timeKey}`;
+
+          memoryLocks.set(lockId, {
+            lockId,
+            bookingReference,
+            customerName,
+            selectedDate: dateStr,
+            courtId: slot.courtId || 'court-1',
+            courtName: slot.courtName || '',
+            timeLabel: slot.timeLabel || '',
+            status,
+            lockedAt: nowIso,
+            expiresAt: expiresAtMs,
+          });
+        }
+        return rpcResult;
+      }
+
+      if (rpcError) {
+        const msg = rpcError.message || '';
+        if (msg.includes('DOUBLE_BOOKING_PREVENTED') || msg.includes('SLOT_HELD_IN_PROGRESS')) {
+          throw new Error(msg);
+        }
+      }
+    } catch (err: any) {
+      if (
+        err?.message &&
+        (err.message.includes('DOUBLE_BOOKING_PREVENTED') || err.message.includes('SLOT_HELD_IN_PROGRESS'))
+      ) {
+        throw err;
+      }
+    }
+
+    // Step 3: Resilient Fallback - Database row locks and unique constraint enforcement
+    for (const slot of slots) {
+      const timeLabel = slot.timeLabel || '';
+      const match = timeLabel.match(/(\d{1,2}):(\d{2})/);
+      const timeKey = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
+      const cleanCourt = (slot.courtId || 'court-1').toLowerCase().trim();
+      const dateStr = (slot.date || selectedDate || '').trim();
+      const lockId = `${dateStr}_${cleanCourt}_${timeKey}`;
+
+      const { data: existingLocks, error: lockCheckErr } = await supabase
+        .from('court_slot_locks')
+        .select('*')
+        .eq('lock_id', lockId);
+
+      if (!lockCheckErr && existingLocks && existingLocks.length > 0) {
+        const lock = existingLocks[0];
+        const lockRef = lock.booking_reference ?? lock.bookingReference;
+        const lockStatus = lock.status;
+        const lockExpiresAt = lock.expires_at ? new Date(lock.expires_at).getTime() : 0;
+
+        if (lockStatus === 'BOOKED' && lockRef && lockRef !== bookingReference) {
+          throw new Error(
+            `DOUBLE_BOOKING_PREVENTED: Slot "${slot.courtName || 'Court'} (${slot.timeLabel || ''})" is already booked by another player (#${lockRef}).`
+          );
+        }
+
+        if (lockStatus === 'HELD' && lockExpiresAt > Date.now() && lockRef && lockRef !== bookingReference) {
+          throw new Error(
+            `SLOT_HELD_IN_PROGRESS: Slot "${slot.courtName || 'Court'} (${slot.timeLabel || ''})" is currently in checkout by another player. Please try again shortly.`
+          );
+        }
+      }
+
+      const lockPayload: any = {
+        lock_id: lockId,
+        booking_reference: bookingReference,
+        customer_name: customerName,
+        date: dateStr,
+        court_id: slot.courtId || 'court-1',
+        court_name: slot.courtName || '',
+        time_label: slot.timeLabel || '',
+        status: status,
+        locked_at: nowIso,
+        expires_at: expiresAtIso,
+      };
+
+      const { error: lockUpsertErr } = await supabase
+        .from('court_slot_locks')
+        .upsert(lockPayload, { onConflict: 'lock_id' });
+
+      if (lockUpsertErr) {
+        if (lockUpsertErr.code === '23505' || lockUpsertErr.message.includes('unique_court_time_slot')) {
+          throw new Error(
+            `DOUBLE_BOOKING_PREVENTED: Slot "${slot.courtName || 'Court'} (${slot.timeLabel || ''})" was just booked by another player.`
+          );
+        }
+        if (!isTableMissingError(lockUpsertErr)) {
+          console.warn('[LOCKS] Fallback lock upsert notice:', lockUpsertErr);
+        }
+      }
+    }
+  }
+
+  // Register in memory
+  for (const slot of slots) {
+    const timeLabel = slot.timeLabel || '';
+    const match = timeLabel.match(/(\d{1,2}):(\d{2})/);
+    const timeKey = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
+    const cleanCourt = (slot.courtId || 'court-1').toLowerCase().trim();
+    const dateStr = (slot.date || selectedDate || '').trim();
+    const lockId = `${dateStr}_${cleanCourt}_${timeKey}`;
+
+    memoryLocks.set(lockId, {
+      lockId,
+      bookingReference,
+      customerName,
+      selectedDate: dateStr,
+      courtId: slot.courtId || 'court-1',
+      courtName: slot.courtName || '',
+      timeLabel: slot.timeLabel || '',
+      status,
+      lockedAt: nowIso,
+      expiresAt: expiresAtMs,
+    });
+  }
+
+  return { success: true, bookingReference, status, expiresAt: expiresAtIso };
+}
+
+/**
+ * Acquire a 5-minute temporary reservation lock (TTL Hold) when user enters checkout
+ */
+export async function holdSlotsWithTtl(
+  bookingReference: string,
+  selectedDate: string,
+  slots: any[],
+  customerName = '',
+  ttlSeconds = 300
+) {
+  return claimSlotsTransaction(bookingReference, customerName, selectedDate, slots, true, ttlSeconds);
+}
+
+/**
+ * Release temporary slot hold if user cancels or leaves checkout
+ */
+export async function releaseSlotHold(bookingReference: string) {
+  if (!bookingReference) return { success: true };
+
+  // Clear from in-memory locks
+  for (const [key, lock] of memoryLocks.entries()) {
+    if (lock.bookingReference === bookingReference && lock.status === 'HELD') {
+      memoryLocks.delete(key);
+    }
+  }
+
+  if (isSupabaseConfigured) {
+    try {
+      await supabase
+        .from('court_slot_locks')
+        .delete()
+        .eq('booking_reference', bookingReference)
+        .eq('status', 'HELD');
+    } catch (err) {
+      console.warn('[LOCKS] Error releasing slot hold:', err);
+    }
+  }
+  return { success: true };
+}
+
 /**
  * Create or save a confirmed booking with atomic slot locks using Supabase syntax
  */
@@ -208,52 +557,14 @@ export async function saveBookingWithLocks(bookingData: BookingInput) {
   }
 
   try {
-    // 1. Verify and create locks for each slot to prevent double bookings
-    for (const slot of bookingData.slots) {
-      const timeLabel = slot.timeLabel || '';
-      const match = timeLabel.match(/(\d{1,2}):(\d{2})/);
-      const timeKey = match ? `${match[1].padStart(2, '0')}${match[2]}` : '0800';
-      const cleanCourt = (slot.courtId || 'court-1').toLowerCase().trim();
-      const dateStr = (slot.date || bookingData.selectedDate || '').trim();
-      const lockId = `${dateStr}_${cleanCourt}_${timeKey}`;
-
-      // Check if an active slot lock already exists in Supabase
-      const { data: existingLocks, error: lockCheckErr } = await supabase
-        .from('court_slot_locks')
-        .select('*')
-        .eq('lock_id', lockId)
-        .eq('status', 'BOOKED');
-
-      if (!lockCheckErr && existingLocks && existingLocks.length > 0) {
-        const lockRef = existingLocks[0].booking_reference ?? existingLocks[0].bookingReference;
-        if (lockRef && lockRef !== bookingData.bookingReference) {
-          throw new Error(
-            `DOUBLE_BOOKING_PREVENTED: Slot "${slot.courtName || 'Court'} (${slot.timeLabel || ''})" was just booked by another player (#${lockRef}).`
-          );
-        }
-      }
-
-      // Upsert slot lock via Supabase
-      const lockPayload = {
-        lock_id: lockId,
-        booking_reference: bookingData.bookingReference,
-        customer_name: bookingData.customerName,
-        date: dateStr,
-        court_id: slot.courtId || 'court-1',
-        court_name: slot.courtName || '',
-        time_label: slot.timeLabel || '',
-        status: 'BOOKED',
-        locked_at: nowIso,
-      };
-
-      const { error: lockUpsertErr } = await supabase
-        .from('court_slot_locks')
-        .upsert(lockPayload, { onConflict: 'lock_id' });
-
-      if (lockUpsertErr && !isTableMissingError(lockUpsertErr)) {
-        console.warn('Court slot lock upsert notice:', lockUpsertErr);
-      }
-    }
+    // 1. Atomically claim/upgrade slot locks to 'BOOKED' status (clears any temporary TTL holds)
+    await claimSlotsTransaction(
+      bookingData.bookingReference,
+      bookingData.customerName,
+      bookingData.selectedDate,
+      bookingData.slots,
+      false // Final confirmed booking, not temporary hold
+    );
 
     // 2. Insert or update the booking record in Supabase
     const bookingPayload = {

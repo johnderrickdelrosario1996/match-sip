@@ -190,11 +190,22 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
     const dbInfo = getSlotDbInfo(slot);
 
     if (isBooked) {
+      const isHeld = dbInfo?.status === 'HELD';
       return (
         <div
           key={slot.id}
-          title={dbInfo ? `Reserved by ${dbInfo.customerName} (#${dbInfo.bookingRef})` : 'Slot Booked'}
-          className="flex flex-col items-center justify-center rounded-xl bg-[#5E2CB2] px-1 sm:px-2 py-2 text-[#FFFFFF] select-none cursor-not-allowed min-h-[56px] sm:min-h-[62px] transition-all relative group text-center border border-white/10"
+          title={
+            isHeld
+              ? 'Slot is currently held in checkout by another player (expires in 5 min)'
+              : dbInfo
+              ? `Reserved by ${dbInfo.customerName} (#${dbInfo.bookingRef})`
+              : 'Slot Booked'
+          }
+          className={`flex flex-col items-center justify-center rounded-xl px-1 sm:px-2 py-2 text-[#FFFFFF] select-none cursor-not-allowed min-h-[56px] sm:min-h-[62px] transition-all relative group text-center border ${
+            isHeld
+              ? 'bg-[#5E2CB2]/80 border-amber-400/40 opacity-90'
+              : 'bg-[#5E2CB2] border-white/10'
+          }`}
         >
           <div className="flex items-center justify-center w-full leading-none my-auto">
             <span className="whitespace-nowrap font-mono text-[11px] sm:text-xs md:text-sm font-bold tracking-tight text-center tabular-nums leading-none select-none opacity-90">
@@ -202,13 +213,15 @@ export const BookingMatrix: React.FC<BookingMatrixProps> = ({
             </span>
           </div>
 
-          <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#B3A2DB] flex items-center justify-center gap-0.5 mt-0.5 leading-none shrink-0 whitespace-nowrap">
-            <Lock className="h-2.5 w-2.5 shrink-0" /> BOOKED
+          <span className={`text-[8.5px] sm:text-[9.5px] font-bold uppercase tracking-wider flex items-center justify-center gap-0.5 mt-0.5 leading-none shrink-0 whitespace-nowrap ${
+            isHeld ? 'text-amber-300' : 'text-[#B3A2DB]'
+          }`}>
+            <Lock className="h-2.5 w-2.5 shrink-0" /> {isHeld ? 'IN PROGRESS' : 'BOOKED'}
           </span>
           {dbInfo && (
             <span className="absolute -top-1 -right-1 flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00C6FF] opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-[#00C6FF]" />
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isHeld ? 'bg-amber-400' : 'bg-[#00C6FF]'} opacity-75`} />
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${isHeld ? 'bg-amber-400' : 'bg-[#00C6FF]'}`} />
             </span>
           )}
         </div>

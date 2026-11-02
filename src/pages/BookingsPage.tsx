@@ -34,6 +34,7 @@ import { EditBookingModal } from '../components/EditBookingModal';
 import { AddBookingModal } from '../components/AddBookingModal';
 import { CalendarPopup } from '../components/CalendarPopup';
 import { PinCodeInput } from '../components/PinCodeInput';
+import { MaintenanceConfirmModal } from '../components/MaintenanceConfirmModal';
 import { 
   getTodayDateString, 
   formatDateToDDMMYYYY, 
@@ -92,6 +93,75 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
   const [toastNotification, setToastNotification] = useState<string | null>(null);
   const [sendingEmailBookingId, setSendingEmailBookingId] = useState<string | null>(null);
   const [isSendingTestEmail, setIsSendingTestEmail] = useState<boolean>(false);
+  const [isMaintenanceEnabled, setIsMaintenanceEnabled] = useState<boolean>(false);
+  const [isTogglingMaintenance, setIsTogglingMaintenance] = useState<boolean>(false);
+  const [isMaintenanceModalOpen, setIsMaintenanceModalOpen] = useState<boolean>(false);
+
+  // Poll current maintenance mode state on load
+  useEffect(() => {
+    fetch('/api/status?_t=' + Date.now())
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && typeof data.maintenanceMode === 'boolean') {
+          setIsMaintenanceEnabled(data.maintenanceMode);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleConfirmToggleMaintenance = async (adminPin: string, confirmPhrase: string): Promise<boolean> => {
+    setIsTogglingMaintenance(true);
+    const targetState = !isMaintenanceEnabled;
+    try {
+      const res = await fetch('/api/maintenance/toggle', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-pin': adminPin,
+        },
+        body: JSON.stringify({
+          enabled: targetState,
+          pin: adminPin,
+          confirmation: confirmPhrase,
+          message: targetState
+            ? 'MATCH & SIP is under maintenance. We will be back soon! You can book thru our Instagram link below.'
+            : '',
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setIsMaintenanceEnabled(data.maintenanceMode);
+
+        // Instantly force update all open tabs on this browser via BroadcastChannel & localStorage
+        try {
+          if (typeof BroadcastChannel !== 'undefined') {
+            const channel = new BroadcastChannel('matchsip_system_sync');
+            channel.postMessage({ maintenanceMode: data.maintenanceMode, timestamp: Date.now() });
+            channel.close();
+          }
+          localStorage.setItem(
+            'matchsip_maintenance_sync',
+            JSON.stringify({ maintenanceMode: data.maintenanceMode, timestamp: Date.now() })
+          );
+        } catch {}
+
+        showNotification(
+          data.maintenanceMode
+            ? '⚠️ Maintenance mode ACTIVATED! All connected match-sip.ai.studio sessions force-updated.'
+            : '✅ Normal operations RESTORED! All connected match-sip.ai.studio sessions force-updated.'
+        );
+        return true;
+      } else {
+        showNotification(data.error || 'Failed to toggle maintenance mode.');
+        return false;
+      }
+    } catch (err: any) {
+      showNotification('Error updating status: ' + (err.message || 'Unknown error'));
+      return false;
+    } finally {
+      setIsTogglingMaintenance(false);
+    }
+  };
 
   const showNotification = (msg: string) => {
     setToastNotification(msg);
@@ -627,6 +697,32 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
 
           <div className="flex items-center gap-3 ml-auto justify-end flex-wrap">
+            {/* REAL-TIME MAINTENANCE MODE TOGGLE BUTTON */}
+            <button
+              type="button"
+              onClick={() => setIsMaintenanceModalOpen(true)}
+              disabled={isTogglingMaintenance}
+              className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-bold transition-all shadow-sm ${
+                isMaintenanceEnabled
+                  ? 'border border-amber-400 bg-amber-500/25 text-amber-300 hover:bg-amber-500/35 animate-pulse'
+                  : 'border border-white/20 bg-white/10 text-white hover:bg-white/15'
+              }`}
+              title={
+                isMaintenanceEnabled
+                  ? 'Maintenance mode is currently ACTIVE across all devices. Click to enter PIN and confirmation to restore normal booking site.'
+                  : 'Click to enter PIN and confirmation to activate Maintenance Mode and lock out all user sessions.'
+              }
+            >
+              <span className={`h-2 w-2 rounded-full ${isMaintenanceEnabled ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'}`} />
+              <span>
+                {isTogglingMaintenance
+                  ? 'Updating...'
+                  : isMaintenanceEnabled
+                  ? 'Maintenance: ACTIVE'
+                  : 'Maintenance: OFF'}
+              </span>
+            </button>
+
             {/* EXPORT TO CSV BUTTON */}
             <button
               type="button"
@@ -1430,6 +1526,16 @@ export const BookingsPage: React.FC<BookingsPageProps> = ({
           </div>
         </div>
       )}
+
+      {/* =====================================================
+          MAINTENANCE CONFIRMATION & PIN GATE MODAL
+      ====================================================== */}
+      <MaintenanceConfirmModal
+        isOpen={isMaintenanceModalOpen}
+        onClose={() => setIsMaintenanceModalOpen(false)}
+        isCurrentlyActive={isMaintenanceEnabled}
+        onConfirm={handleConfirmToggleMaintenance}
+      />
 
       {/* =====================================================
           TOAST FEEDBACK

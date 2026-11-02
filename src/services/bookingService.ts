@@ -576,3 +576,58 @@ export function subscribeToSingleBooking(
     clearInterval(intervalId);
   };
 }
+
+/**
+ * Acquire a 5-minute temporary reservation lock (TTL Hold) when user enters checkout (Mechanism 3)
+ */
+export async function holdSlotsLive(
+  bookingReference: string,
+  selectedDate: string,
+  slots: SelectedSlot[],
+  customerName = '',
+  ttlSeconds = 300
+): Promise<{ success: boolean; conflictReason?: string }> {
+  try {
+    const res = await fetch('/api/slots/hold', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bookingReference,
+        selectedDate,
+        slots,
+        customerName,
+        ttlSeconds,
+      }),
+    });
+
+    if (res.status === 409) {
+      const err = await res.json().catch(() => ({}));
+      return {
+        success: false,
+        conflictReason: err.error || 'One or more of your selected slots is already locked or in checkout by another player.',
+      };
+    }
+
+    if (!res.ok) {
+      return { success: true };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: true };
+  }
+}
+
+/**
+ * Release temporary hold if user cancels or leaves checkout
+ */
+export async function releaseSlotsHoldLive(bookingReference: string): Promise<void> {
+  if (!bookingReference) return;
+  try {
+    await fetch('/api/slots/release', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookingReference }),
+    });
+  } catch {}
+}

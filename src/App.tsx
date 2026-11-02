@@ -23,6 +23,7 @@ import { useNetworkStatus } from './utils/useNetworkStatus';
 const BookingsPage = lazy(() => import('./pages/BookingsPage').then((m) => ({ default: m.BookingsPage })));
 const BookingSuccessModal = lazy(() => import('./components/BookingSuccessModal').then((m) => ({ default: m.BookingSuccessModal })));
 const ReservationsModal = lazy(() => import('./components/ReservationsModal').then((m) => ({ default: m.ReservationsModal })));
+import MaintenancePage from './MaintenancePage.tsx';
 
 const SELECTED_SLOTS_STORAGE_KEY = 'matchsip_selected_slots';
 const SELECTED_DATE_STORAGE_KEY = 'matchsip_selected_date';
@@ -40,6 +41,97 @@ export default function App() {
   const location = useLocation();
   const isBookingsPage = location.pathname === '/bookings';
 
+  // Real-Time System Status & Maintenance State (SSE stream + BroadcastChannel + storage + polling)
+  const [isMaintenanceActive, setIsMaintenanceActive] = useState<boolean>(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    let eventSource: EventSource | null = null;
+    let channel: BroadcastChannel | null = null;
+
+    const applyStatus = (active: boolean) => {
+      if (!isMounted) return;
+      setIsMaintenanceActive(active);
+      if (active) {
+        setIsReservationsModalOpen(false);
+      }
+    };
+
+    // 1. Initial snapshot check & fallback polling
+    const checkMaintenance = async () => {
+      try {
+        const res = await fetch(`/api/status?_t=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (typeof data.maintenanceMode === 'boolean') {
+          applyStatus(data.maintenanceMode);
+        }
+      } catch (err) {}
+    };
+
+    checkMaintenance();
+    const timer = setInterval(checkMaintenance, 15000);
+    window.addEventListener('focus', checkMaintenance);
+    document.addEventListener('visibilitychange', checkMaintenance);
+
+    // 2. Real-Time Server-Sent Events (SSE) Stream: forces instant status update across all devices
+    try {
+      eventSource = new EventSource('/api/status/stream');
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && typeof data.maintenanceMode === 'boolean') {
+            applyStatus(data.maintenanceMode);
+          }
+        } catch {}
+      };
+    } catch (err) {
+      console.warn('[SSE] EventSource could not be initialized:', err);
+    }
+
+    // 3. Local BroadcastChannel: forces instantaneous status update across all open browser tabs in 0ms
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        channel = new BroadcastChannel('matchsip_system_sync');
+        channel.onmessage = (e) => {
+          if (e.data && typeof e.data.maintenanceMode === 'boolean') {
+            applyStatus(e.data.maintenanceMode);
+          }
+        };
+      }
+    } catch {}
+
+    // 4. LocalStorage StorageEvent: cross-window synchronization fallback
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'matchsip_maintenance_sync' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (typeof parsed.maintenanceMode === 'boolean') {
+            applyStatus(parsed.maintenanceMode);
+          }
+        } catch {}
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+      window.removeEventListener('focus', checkMaintenance);
+      document.removeEventListener('visibilitychange', checkMaintenance);
+      window.removeEventListener('storage', handleStorage);
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (channel) {
+        channel.close();
+      }
+    };
+  }, []);
+
   // Network drop tracking & offline fallbacks
   const { isOnline, wasOffline } = useNetworkStatus();
 
@@ -53,10 +145,10 @@ export default function App() {
     return today;
   });
 
-  // Restore cached selected slots only if saved recently and valid for today or a future date
+  // Restore cached selected slots from sessionStorage (or localStorage fallback)
   const [selectedSlots, setSelectedSlots] = useState<SelectedSlot[]>(() => {
     try {
-      const raw = localStorage.getItem(SELECTED_SLOTS_STORAGE_KEY);
+      const raw = sessionStorage.getItem(SELECTED_SLOTS_STORAGE_KEY) || localStorage.getItem(SELECTED_SLOTS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         const today = getTodayDateString();
@@ -73,6 +165,7 @@ export default function App() {
           }
         }
       }
+      sessionStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
       localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
     } catch {}
     return [];
@@ -90,15 +183,15 @@ export default function App() {
   });
   const [isReservationsModalOpen, setIsReservationsModalOpen] = useState<boolean>(false);
 
-  // Sync active draft slots to local storage so sudden connection drops don't lose the user's ongoing selection
+  // Sync active draft slots to sessionStorage and localStorage for seamless refresh preservation
   useEffect(() => {
     try {
       if (selectedSlots.length > 0) {
-        localStorage.setItem(
-          SELECTED_SLOTS_STORAGE_KEY,
-          JSON.stringify({ slots: selectedSlots, savedAt: Date.now() })
-        );
+        const payload = JSON.stringify({ slots: selectedSlots, savedAt: Date.now() });
+        sessionStorage.setItem(SELECTED_SLOTS_STORAGE_KEY, payload);
+        localStorage.setItem(SELECTED_SLOTS_STORAGE_KEY, payload);
       } else {
+        sessionStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
         localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
       }
     } catch {}
@@ -256,34 +349,70 @@ export default function App() {
   }, [navigate]);
 
   const handleBookingComplete = useCallback(async (booking: ConfirmedBooking) => {
+    // 1. Optimistic UI update: immediately lock the slot visually in the matrix
+    const optimisticBooking: ConfirmedBooking = {
+      ...booking,
+      status: 'VERIFIED',
+    };
+
+    setPersistedBookings((prev) => [
+      optimisticBooking,
+      ...prev.filter((b) => b.bookingReference !== booking.bookingReference),
+    ]);
+
     try {
-      // 1. Atomic commit to Supabase with court slot locks
+      // 2. Process backend commit in background with Supabase slot locks
       await saveBookingToFirestore(booking);
 
-      // 2. On atomic commit success: update state, clear cached selection and draft
-      setPersistedBookings((prev) => [booking, ...prev.filter((b) => b.bookingReference !== booking.bookingReference)]);
+      // On confirmation: finalize confirmed state and clear drafts
       setConfirmedBooking(booking);
       setSelectedSlots([]);
       try {
+        sessionStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
+        sessionStorage.removeItem('matchsip_checkout_draft');
         localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
+        localStorage.removeItem('matchsip_checkout_draft');
       } catch {}
       showToast(`Reservation #${booking.bookingReference} confirmed!`);
     } catch (error: any) {
       console.error('Error saving to Supabase:', error);
-      if (error?.message && error.message.includes('DOUBLE_BOOKING_PREVENTED')) {
-        showToast('⚠️ Slot conflict: This court hour was just booked by another player.');
+
+      // Revert optimistic reservation
+      setPersistedBookings((prev) => prev.filter((b) => b.bookingReference !== booking.bookingReference));
+
+      const isConflict = error?.message && (
+        error.message.includes('DOUBLE_BOOKING_PREVENTED') ||
+        error.message.includes('Slot conflict') ||
+        error.message.includes('already locked') ||
+        error.message.includes('409')
+      );
+
+      if (isConflict) {
+        // Gracefully release conflicting slots without forcing a page reload
+        const conflictingSlotIds = new Set(
+          (booking.slots || []).map((s) => s.slotId)
+        );
+        setSelectedSlots((prev) => prev.filter((s) => !conflictingSlotIds.has(s.slotId)));
+
+        showToast('⚠️ Slot conflict: That court time was just reserved by another player moments ago. The slot has been released.');
         throw error;
       }
-      // Transient offline fallback only for non-conflict network errors
-      setPersistedBookings((prev) => [booking, ...prev.filter((b) => b.bookingReference !== booking.bookingReference)]);
+
+      // Offline fallback: keep locally if network drop
+      setPersistedBookings((prev) => [
+        optimisticBooking,
+        ...prev.filter((b) => b.bookingReference !== booking.bookingReference),
+      ]);
       setConfirmedBooking(booking);
       setSelectedSlots([]);
-      try {
-        localStorage.removeItem(SELECTED_SLOTS_STORAGE_KEY);
-      } catch {}
-      showToast(`Reservation #${booking.bookingReference} preserved locally!`);
+      showToast(`Reservation #${booking.bookingReference} saved offline!`);
     }
   }, [showToast]);
+
+  // Instantly lock out customer sessions across all devices when maintenance mode is active
+  if (isMaintenanceActive && !isBookingsPage) {
+    return <MaintenancePage />;
+  }
 
   return (
     <div className="min-h-screen bg-[#5E2CB2] text-[#FFFFFF] flex flex-col selection:bg-[#00C6FF] selection:text-black">

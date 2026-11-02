@@ -1,12 +1,9 @@
-import express from 'express';
+import 'dotenv/config';
+import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
-import dotenv from 'dotenv';
-import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { Resend } from 'resend';
-import QRCode from 'qrcode';
-import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
-import { getUsers, getOrCreateUser } from './src/db/users.ts';
+import { getMaintenanceStatus, setMaintenanceStatus } from './src/db/settings.ts';
 import {
   getAllBookings,
   getBookingsByDate,
@@ -14,973 +11,498 @@ import {
   saveBookingWithLocks,
   deleteBookingByReference,
   updateBookingFields,
+  holdSlotsWithTtl,
+  releaseSlotHold,
 } from './src/db/bookings.ts';
-import {
-  bookingsReadLimiter,
-  bookingsWriteLimiter,
-  duplicateBookingProtection,
-} from './src/middleware/rateLimiter.ts';
 import {
   recordAnalyticsEvent,
   getAnalyticsLogs,
   purgeOldAnalyticsLogs,
-  getAnalyticsMetrics,
   deleteAnalyticsLogById,
-  clearAllAnalyticsLogs,
 } from './src/db/analytics.ts';
-import { isSupabaseConfigured } from './src/lib/supabase.ts';
-
-dotenv.config({ override: true });
+import {
+  duplicateBookingProtection,
+  bookingsReadLimiter,
+  bookingsWriteLimiter,
+} from './src/middleware/rateLimiter.ts';
 
 const app = express();
-const PORT = 3000;
-const SERVER_BOOT_TIME = Date.now();
-const APP_VERSION = '1.2.0';
-
-// Strictly lock admin notifications exclusively to danamieratan@gmail.com
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const ADMIN_PIN = '0912';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'danamieratan@gmail.com';
+const BUILD_TIME = Date.now();
 
-// Capture raw body for webhook HMAC-SHA256 signature verification
-app.use(
-  express.json({
-    limit: '10mb',
-    verify: (req: any, _res, buf) => {
-      req.rawBody = buf.toString();
-    },
-  })
-);
-
-// Malformed JSON payload syntax error guard
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  if (err instanceof SyntaxError && (err as any).status === 400 && 'body' in err) {
-    return res.status(400).json({ success: false, error: 'Malformed JSON payload.' });
-  }
-  next(err);
-});
-
-// Aggressive Cache-Control headers for all dynamic API endpoints
-app.use('/api', (_req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-  res.setHeader('Surrogate-Control', 'no-store');
-  next();
-});
-
-// App Version & Deployment Check Endpoint (for client force-refresh detection)
-app.get(['/api/version', '/version.json'], (_req, res) => {
-  res.json({
-    version: APP_VERSION,
-    buildTime: SERVER_BOOT_TIME,
-    environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date(SERVER_BOOT_TIME).toISOString(),
-  });
-});
-
-// Lazy Resend client initialization with dynamic key tracking
-let cachedApiKey = '';
-let resendClient: Resend | null = null;
-
+// Resend Email Client
 function getResendClient(): Resend | null {
-  const key = process.env.RESEND_API_KEY?.trim();
-  if (!key) return null;
-  if (!resendClient || cachedApiKey !== key) {
-    cachedApiKey = key;
-    resendClient = new Resend(key);
-  }
-  return resendClient;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return null;
+  return new Resend(apiKey);
 }
 
-// Helper to mask API key for safe verification
-function getMaskedKey(key?: string): string {
-  if (!key) return 'none';
-  const trimmed = key.trim();
-  if (trimmed.length <= 8) return '****';
-  return `${trimmed.slice(0, 5)}...${trimmed.slice(-4)}`;
-}
+// Global Middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Helper to extract client IP address (handling proxy headers like x-forwarded-for)
-function getClientIp(req: express.Request): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') {
-    return forwarded.split(',')[0].trim();
-  }
-  if (Array.isArray(forwarded) && forwarded.length > 0) {
-    return forwarded[0].trim();
-  }
-  return req.socket?.remoteAddress || '127.0.0.1';
-}
+// Trust reverse proxy (Cloud Run, load balancers)
+app.set('trust proxy', 1);
 
-function getUserAgent(req: express.Request): string {
-  return (req.headers['user-agent'] as string) || 'Unknown';
-}
+// Active Server-Sent Events (SSE) connections for instant maintenance status synchronization
+const sseClients = new Set<Response>();
 
-// Authentication gate for analytics endpoints (matches /bookings admin gate)
-function requireAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const pinHeader = req.headers['x-admin-pin'] as string | undefined;
-  const authHeader = req.headers['authorization'];
-  if (pinHeader && pinHeader.trim() === '0912') {
-    return next();
-  }
-  if (authHeader && authHeader.trim().startsWith('Bearer 0912')) {
-    return next();
-  }
-  return res.status(401).json({
-    success: false,
-    error: 'Unauthorized: Admin authentication required to access security analytics.',
-  });
-}
+function broadcastMaintenanceStatus(maintenanceMode: boolean, message?: string) {
+  const payload = `data: ${JSON.stringify({
+    maintenanceMode,
+    message: message || '',
+    timestamp: Date.now(),
+  })}\n\n`;
 
-/**
- * Shared Admin Notification Email Sender
- */
-async function sendAdminNotification(booking: any) {
-  try {
-    const resend = getResendClient();
-    if (!resend) {
-      console.warn(
-        `[MATCH&SIP] RESEND_API_KEY is not configured in environment. Skipping email dispatch to ${ADMIN_EMAIL}.`
-      );
-      return { success: false, skipped: true };
-    }
-
-    const {
-      customer,
-      slots = [],
-      totalAmount,
-      selectedDate,
-      bookingReference,
-      paymentMethod = 'GCash (PayMongo)',
-      status = 'BOOKED',
-    } = booking;
-
-    const customerName = customer?.fullName || 'Guest Customer';
-    const customerPhone = customer?.phoneNumber || 'Not provided';
-
-    const formattedAmount =
-      typeof totalAmount === 'number'
-        ? `₱${totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`
-        : `₱${totalAmount || '0.00'}`;
-
-    const slotsListText = slots
-      .map((s: any) => `• ${s.courtName || 'Court'} - ${s.timeLabel || ''} (₱${s.price || 0})`)
-      .join('\n');
-
-    const slotsHtmlRows = slots
-      .map(
-        (s: any) => `
-        <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
-          <td style="padding: 10px 14px; font-weight: 600; color: #FFFFFF;">${s.courtName || 'Court'}</td>
-          <td style="padding: 10px 14px; color: #00C6FF; font-family: monospace;">${s.timeLabel || ''}</td>
-          <td style="padding: 10px 14px; text-align: right; color: #FFFFFF; font-weight: bold;">₱${s.price || 0}</td>
-        </tr>`
-      )
-      .join('');
-
-    const fromEmail = process.env.RESEND_FROM_EMAIL || 'MATCH and SIP <onboarding@resend.dev>';
-
-    const htmlContent = `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="utf-8">
-      <title>Court Reservation Confirmed (GCash)</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    </head>
-    <body style="margin: 0; padding: 24px 0; background-color: #431E82; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #FFFFFF;">
-      <div style="max-width: 600px; margin: 0 auto; background-color: #5E2CB2; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,0.18); box-shadow: 0 20px 40px rgba(0,0,0,0.3);">
-        
-        <!-- Header Banner -->
-        <div style="background: linear-gradient(135deg, #00C6FF 0%, #0B63CE 100%); padding: 32px 28px 24px;">
-          <div style="display: inline-block; background-color: #000000; color: #00C6FF; font-size: 11px; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; padding: 4px 12px; border-radius: 9999px; margin-bottom: 12px;">
-            GCASH PAYMENT VERIFIED • ${status}
-          </div>
-          <h1 style="margin: 0; font-size: 26px; font-weight: 900; color: #FFFFFF; letter-spacing: -0.02em;">
-            MATCH<span style="color: #ffd200;">&amp;</span>SIP
-          </h1>
-          <p style="margin: 6px 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">
-            A new automated GCash court reservation has been verified and permanently updated to <strong>BOOKED</strong> in Cloud Firestore.
-          </p>
-        </div>
-
-        <!-- Reference Banner -->
-        <div style="background-color: rgba(0, 198, 255, 0.08); padding: 18px 28px; border-bottom: 1px solid rgba(0, 198, 255, 0.2);">
-          <table style="width: 100%; border-collapse: collapse;">
-            <tr>
-              <td>
-                <span style="font-size: 11px; text-transform: uppercase; color: #00C6FF; font-weight: 700; letter-spacing: 0.05em; display: block;">Reference Code</span>
-                <span style="font-size: 20px; font-weight: 900; color: #FFFFFF; font-family: monospace; letter-spacing: 0.05em;">#${bookingReference}</span>
-              </td>
-              <td style="text-align: right;">
-                <span style="font-size: 11px; text-transform: uppercase; color: rgba(255,255,255,0.6); font-weight: 700; display: block;">Date</span>
-                <span style="font-size: 14px; font-weight: 700; color: #FFFFFF;">${selectedDate || 'Today'}</span>
-              </td>
-            </tr>
-          </table>
-        </div>
-
-        <!-- Body Details -->
-        <div style="padding: 28px;">
-          <!-- Customer Info Box -->
-          <div style="background-color: rgba(0,0,0,0.18); border-radius: 14px; border: 1px solid rgba(255,255,255,0.1); padding: 20px; margin-bottom: 24px;">
-            <h3 style="margin: 0 0 14px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #00C6FF; font-weight: 800;">
-              Customer Details
-            </h3>
-            <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-              <tr>
-                <td style="padding: 6px 0; color: rgba(255,255,255,0.6); width: 35%;">Customer Name:</td>
-                <td style="padding: 6px 0; color: #FFFFFF; font-weight: 700;">${customerName}</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; color: rgba(255,255,255,0.6);">Phone Number:</td>
-                <td style="padding: 6px 0; color: #00C6FF; font-weight: 700;">${customerPhone}</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; color: rgba(255,255,255,0.6);">Payment Gateway:</td>
-                <td style="padding: 6px 0; color: #00C6FF; font-weight: 700;">${paymentMethod}</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; color: rgba(255,255,255,0.6);">Status:</td>
-                <td style="padding: 6px 0; color: #10B981; font-weight: 800;">${status}</td>
-              </tr>
-            </table>
-          </div>
-
-          <!-- Reserved Slots Table -->
-          <h3 style="margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #00C6FF; font-weight: 800;">
-            Reserved Court Slots (${slots.length})
-          </h3>
-          <div style="background-color: rgba(0,0,0,0.18); border-radius: 14px; border: 1px solid rgba(255,255,255,0.1); overflow: hidden; margin-bottom: 24px;">
-            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-              <thead>
-                <tr style="background-color: rgba(255,255,255,0.06); text-align: left; font-size: 11px; text-transform: uppercase; color: rgba(255,255,255,0.5);">
-                  <th style="padding: 10px 14px;">Court</th>
-                  <th style="padding: 10px 14px;">Time</th>
-                  <th style="padding: 10px 14px; text-align: right;">Rate</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${slotsHtmlRows}
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Total Price Highlight Box -->
-          <div style="background: linear-gradient(135deg, rgba(0,198,255,0.15) 0%, rgba(94,44,178,0.4) 100%); border: 1px solid #00C6FF; border-radius: 14px; padding: 18px 22px;">
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td>
-                  <span style="font-size: 11px; text-transform: uppercase; color: rgba(255,255,255,0.7); font-weight: 800; letter-spacing: 0.08em; display: block;">
-                    Total Amount Verified
-                  </span>
-                  <span style="font-size: 12px; color: #10B981; font-weight: 700;">Status: ${status}</span>
-                </td>
-                <td style="text-align: right; font-size: 26px; font-weight: 900; color: #FFFFFF; text-shadow: 0 2px 10px rgba(0,198,255,0.4);">
-                  ${formattedAmount}
-                </td>
-              </tr>
-            </table>
-          </div>
-
-        </div>
-
-        <!-- Footer Note -->
-        <div style="background-color: rgba(0,0,0,0.25); padding: 18px 28px; text-align: center; border-top: 1px solid rgba(255,255,255,0.1); font-size: 12px; color: rgba(255,255,255,0.5);">
-          Automated Admin Notification · MATCH&SIP Court Management System
-        </div>
-
-      </div>
-    </body>
-    </html>
-    `;
-
-    const textContent = `
-NEW GCASH BOOKING CONFIRMED - MATCH&SIP
-=======================================
-Reference Code: #${bookingReference}
-Date: ${selectedDate || 'Today'}
-Status: ${status}
-
-CUSTOMER DETAILS:
-- Name: ${customerName}
-- Phone Number: ${customerPhone}
-- Payment: ${paymentMethod}
-
-RESERVED SLOTS:
-${slotsListText}
-
-TOTAL AMOUNT: ${formattedAmount}
-`;
-
-    const emailResponse = await resend.emails.send({
-      from: fromEmail,
-      to: ADMIN_EMAIL,
-      subject: `🏸 GCash Payment Verified: #${bookingReference} - ${customerName}`,
-      html: htmlContent,
-      text: textContent,
-    });
-
-    console.log('[MATCH&SIP] Admin notification email sent successfully:', emailResponse);
-    return { success: true, data: emailResponse };
-  } catch (err) {
-    console.error('[MATCH&SIP] Error in sendAdminNotification:', err);
-    return { success: false, error: err };
-  }
-}
-
-// API Health Check & Configuration Status
-app.get('/api/health', (req, res) => {
-  const currentKey = process.env.RESEND_API_KEY?.trim();
-  const currentFrom = process.env.RESEND_FROM_EMAIL?.trim() || 'MATCH and SIP <onboarding@resend.dev>';
-  const paymongoKey = process.env.PAYMONGO_SECRET_KEY?.trim();
-  const webhookKey = process.env.PAYMONGO_WEBHOOK_SECRET_KEY?.trim();
-  const supabaseUrl = process.env.SUPABASE_URL?.trim();
-  const supabaseKey = process.env.SUPABASE_ANON_KEY?.trim();
-
-  res.json({
-    status: 'ok',
-    supabaseConfigured: isSupabaseConfigured,
-    supabaseUrlConfigured: !!supabaseUrl,
-    maskedSupabaseKey: getMaskedKey(supabaseKey),
-    resendConfigured: !!currentKey,
-    activeSender: currentFrom,
-    maskedApiKey: getMaskedKey(currentKey),
-    paymongoConfigured: !!paymongoKey,
-    maskedPaymongoKey: getMaskedKey(paymongoKey),
-    webhookConfigured: !!webhookKey,
-    adminEmail: ADMIN_EMAIL,
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// Admin Booking Notification Endpoint
-app.post('/api/notify-admin', async (req, res) => {
-  try {
-    const { booking } = req.body;
-    if (!booking || !booking.bookingReference) {
-      return res.status(400).json({ success: false, error: 'Invalid booking data provided.' });
-    }
-
-    const result = await sendAdminNotification(booking);
-    return res.json(result);
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-/**
- * Supabase & Firebase Auth User Endpoints
- */
-app.get('/api/users', requireAuth, async (req: AuthRequest, res) => {
-  try {
-    const allUsers = await getUsers();
-    res.json({ success: true, users: allUsers });
-  } catch (error: any) {
-    console.error('Failed to fetch users:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch users' });
-  }
-});
-
-app.post('/api/users/sync', requireAuth, async (req: AuthRequest, res) => {
-  try {
-    const uid = req.user?.uid;
-    const email = req.user?.email || '';
-    if (!uid) {
-      return res.status(400).json({ error: 'User UID missing from token' });
-    }
-    const syncedUser = await getOrCreateUser(uid, email);
-    res.json({ success: true, user: syncedUser });
-  } catch (error: any) {
-    console.error('Failed to sync user:', error);
-    res.status(500).json({ error: error.message || 'Failed to sync user' });
-  }
-});
-
-/**
- * Supabase Bookings API (supports both /api/bookings and legacy /api/sql/bookings)
- */
-app.get(['/api/bookings', '/api/sql/bookings'], bookingsReadLimiter(120, 60000), async (req, res) => {
-  try {
-    const limitCount = req.query.limit ? Number(req.query.limit) : 250;
-    const date = req.query.date as string | undefined;
-    let results;
-    if (date) {
-      results = await getBookingsByDate(date);
-    } else {
-      results = await getAllBookings(limitCount);
-    }
-    res.json({ success: true, bookings: results });
-  } catch (error: any) {
-    console.error('Failed to fetch bookings from Supabase:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch bookings' });
-  }
-});
-
-app.get(['/api/bookings/:reference', '/api/sql/bookings/:reference'], bookingsReadLimiter(120, 60000), async (req, res) => {
-  try {
-    const { reference } = req.params;
-    const booking = await getBookingByReference(reference);
-    if (!booking) {
-      return res.status(404).json({ error: 'Booking not found' });
-    }
-    res.json({ success: true, booking });
-  } catch (error: any) {
-    console.error('Failed to fetch booking from Supabase:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch booking' });
-  }
-});
-
-app.post(
-  ['/api/bookings', '/api/sql/bookings'],
-  bookingsWriteLimiter(20, 60000),
-  duplicateBookingProtection,
-  async (req, res) => {
+  for (const client of sseClients) {
     try {
-      const bookingInput = req.body;
-      if (!bookingInput || !bookingInput.bookingReference || !bookingInput.selectedDate) {
-        return res.status(400).json({ error: 'bookingReference and selectedDate are required' });
-      }
-      const result = await saveBookingWithLocks(bookingInput);
-
-      // Record security audit / booking analytics event
-      recordAnalyticsEvent({
-        ipAddress: getClientIp(req),
-        action: `Booking Confirmed: #${bookingInput.bookingReference} (${bookingInput.customerName} • ₱${bookingInput.totalAmount || 0})`,
-        userAgent: getUserAgent(req),
-      }).catch(() => {});
-
-      res.json({ success: true, booking: result });
-    } catch (error: any) {
-      console.error('Failed to save booking to Supabase:', error);
-      const isConflict = error?.message?.includes('DOUBLE_BOOKING_PREVENTED');
-      res.status(isConflict ? 409 : 500).json({ error: error.message || 'Failed to save booking' });
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
     }
   }
-);
+}
 
-app.put(['/api/bookings/:reference', '/api/sql/bookings/:reference'], bookingsWriteLimiter(20, 60000), async (req, res) => {
-  try {
-    const { reference } = req.params;
-    const updates = req.body;
-    const updated = await updateBookingFields(reference, updates);
-    if (!updated) {
-      return res.status(404).json({ error: 'Booking not found' });
-    }
-
-    // Record security audit event
-    recordAnalyticsEvent({
-      ipAddress: getClientIp(req),
-      action: `Admin Updated Booking: #${reference}`,
-      userAgent: getUserAgent(req),
-    }).catch(() => {});
-
-    res.json({ success: true, booking: updated });
-  } catch (error: any) {
-    console.error('Failed to update booking in Supabase:', error);
-    res.status(500).json({ error: error.message || 'Failed to update booking' });
-  }
-});
-
-app.delete(['/api/bookings/:reference', '/api/sql/bookings/:reference'], bookingsWriteLimiter(20, 60000), async (req, res) => {
-  try {
-    const { reference } = req.params;
-    const deleted = await deleteBookingByReference(reference);
-
-    // Record security audit event
-    recordAnalyticsEvent({
-      ipAddress: getClientIp(req),
-      action: `Admin Deleted Booking: #${reference}`,
-      userAgent: getUserAgent(req),
-    }).catch(() => {});
-
-    res.json({ success: true, deletedBooking: deleted });
-  } catch (error: any) {
-    console.error('Failed to delete booking in Supabase:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete booking' });
-  }
-});
+// -------------------------------------------------------------
+// 1. SYSTEM STATUS & MAINTENANCE API (Dual-Layer Server-Side Guard)
+// -------------------------------------------------------------
 
 /**
- * Visitor Analytics & Security Audit Tracking Endpoint
+ * Public lightweight status endpoint.
+ * Returns current maintenance mode state and message.
  */
-app.post('/api/analytics/track', bookingsWriteLimiter(150, 60000), async (req, res) => {
+app.get('/api/status', async (_req: Request, res: Response) => {
   try {
-    const ip = getClientIp(req);
-    const ua = getUserAgent(req);
-    const action = req.body?.action || 'Page View';
-    await recordAnalyticsEvent({
-      ipAddress: ip,
-      action: String(action).slice(0, 500),
-      userAgent: ua,
-    });
-    res.json({ success: true });
-  } catch (err: any) {
-    console.error('Analytics track error:', err);
-    res.status(500).json({ success: false, error: 'Tracking failed' });
-  }
-});
-
-/**
- * Protected Visitor Analytics Query Endpoint (Rolling 48-Hour Window)
- */
-app.get('/api/analytics', bookingsReadLimiter(60, 60000), requireAdminAuth, async (req, res) => {
-  try {
-    const limitCount = req.query.limit ? Number(req.query.limit) : 500;
-    const [logs, metrics] = await Promise.all([
-      getAnalyticsLogs(limitCount),
-      getAnalyticsMetrics(),
-    ]);
-    res.json({ success: true, logs, metrics });
-  } catch (error: any) {
-    console.error('Failed to fetch analytics:', error);
-    res.status(500).json({ success: false, error: error.message || 'Failed to fetch analytics' });
-  }
-});
-
-/**
- * Delete a specific analytics log record (Protected with requireAdminAuth)
- */
-app.delete('/api/analytics/:id', bookingsWriteLimiter(30, 60000), requireAdminAuth, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (isNaN(id)) {
-      return res.status(400).json({ success: false, error: 'Invalid record ID' });
-    }
-    const deleted = await deleteAnalyticsLogById(id);
-    if (!deleted) {
-      return res.status(404).json({ success: false, error: 'Analytics record not found' });
-    }
-    res.json({ success: true, message: `Record #${id} deleted`, deleted });
-  } catch (error: any) {
-    console.error('Failed to delete analytics record:', error);
-    res.status(500).json({ success: false, error: error.message || 'Failed to delete record' });
-  }
-});
-
-/**
- * Reset / purge all present visitor analytics logs and refresh the tracking feed (Protected with requireAdminAuth)
- */
-app.delete('/api/analytics', bookingsWriteLimiter(10, 60000), requireAdminAuth, async (req, res) => {
-  try {
-    const result = await clearAllAnalyticsLogs();
-    res.json({
-      success: true,
-      message: `Cleared ${result.count} analytics records. Analytics feed refreshed.`,
-      count: result.count,
-    });
-  } catch (error: any) {
-    console.error('Failed to clear analytics logs:', error);
-    res.status(500).json({ success: false, error: error.message || 'Failed to clear analytics logs' });
-  }
-});
-
-// Periodic background job: enforces 48-hour rolling retention window (every 30 minutes)
-setInterval(() => {
-  purgeOldAnalyticsLogs(48).catch((err) => {
-    console.warn('[ANALYTICS] Scheduled 48-hour purge warning:', err);
-  });
-}, 30 * 60 * 1000);
-
-
-/**
- * 1. CHECKOUT CREATION API (/api/create-checkout)
- * Integrates PayMongo Checkout Session or Source when user clicks BOOK RESERVATION.
- * Generates GCash checkout URL & dynamic QR code, and holds the booking in Firestore.
- */
-app.post(
-  '/api/create-checkout',
-  bookingsWriteLimiter(20, 60000),
-  duplicateBookingProtection,
-  async (req, res) => {
-  try {
-    const { booking } = req.body;
-    if (!booking || !booking.bookingReference || !booking.totalAmount) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required booking parameters (bookingReference, totalAmount).',
-      });
-    }
-
-    const {
-      bookingReference,
-      selectedDate,
-      customer,
-      slots = [],
-      totalAmount,
-    } = booking;
-
-    // Record security audit event
-    recordAnalyticsEvent({
-      ipAddress: getClientIp(req),
-      action: `Checkout Session Initiated: #${bookingReference} (₱${totalAmount})`,
-      userAgent: getUserAgent(req),
-    }).catch(() => {});
-
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.get('host') || 'localhost:3000';
-    const baseUrl =
-      process.env.APP_URL?.replace(/\/$/, '') ||
-      `${protocol}://${host}`;
-
-    // Secure the reservation with initial status 'PENDING' in Supabase
-    try {
-      await saveBookingWithLocks({
-        bookingReference,
-        selectedDate,
-        paymentMethod: 'GCash (PayMongo)',
-        customerName: customer?.fullName || 'Customer',
-        customerPhone: customer?.phoneNumber || '',
-        customerEmail: customer?.email || '',
-        customerNotes: customer?.notes || '',
-        slots: slots.map((s: any) => ({
-          slotId: s.slotId,
-          courtId: s.courtId,
-          courtName: s.courtName,
-          timeLabel: s.timeLabel,
-          date: s.date || selectedDate,
-          price: s.price,
-        })),
-        totalAmount: Number(totalAmount),
-        status: 'PENDING',
-      });
-    } catch (sqlErr) {
-      console.warn('[MATCH&SIP] Initial booking setup in Supabase notice:', sqlErr);
-    }
-
-    const paymongoSecretKey = process.env.PAYMONGO_SECRET_KEY?.trim();
-
-    // IF PayMongo Secret Key is configured, make real API call to PayMongo
-    if (paymongoSecretKey) {
-      try {
-        console.log(`[MATCH&SIP] Creating PayMongo Checkout Session for #${bookingReference} (₱${totalAmount})`);
-        
-        // Build line items for PayMongo
-        const lineItems = slots.length > 0
-          ? slots.map((s: any) => ({
-              name: `${s.courtName} (${s.timeLabel})`,
-              amount: Math.round(Number(s.price) * 100), // amount in centavos
-              currency: 'PHP',
-              quantity: 1,
-            }))
-          : [
-              {
-                name: `MATCH&SIP Court Booking #${bookingReference}`,
-                amount: Math.round(Number(totalAmount) * 100),
-                currency: 'PHP',
-                quantity: 1,
-              },
-            ];
-
-        const paymongoPayload = {
-          data: {
-            attributes: {
-              send_email_receipt: false,
-              show_description: true,
-              show_line_items: true,
-              payment_method_types: ['gcash'],
-              description: `MATCH&SIP Court Booking #${bookingReference} - ${selectedDate}`,
-              line_items: lineItems,
-              reference_number: bookingReference,
-              success_url: `${baseUrl}/payment/success?reference=${bookingReference}&gateway=paymongo`,
-              cancel_url: `${baseUrl}/?cancelled=true&reference=${bookingReference}`,
-              metadata: {
-                bookingReference,
-                selectedDate,
-                customerName: customer?.fullName,
-                customerPhone: customer?.phoneNumber,
-              },
-            },
-          },
-        };
-
-        const response = await fetch('https://api.paymongo.com/v1/checkout_sessions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Basic ${Buffer.from(paymongoSecretKey + ':').toString('base64')}`,
-          },
-          body: JSON.stringify(paymongoPayload),
-        });
-
-        const paymongoData = await response.json();
-
-        if (response.ok && paymongoData?.data?.attributes?.checkout_url) {
-          const checkoutUrl = paymongoData.data.attributes.checkout_url;
-          // Generate crisp dynamic QR code data URL
-          const qrCodeUrl = await QRCode.toDataURL(checkoutUrl, {
-            margin: 2,
-            width: 320,
-            color: { dark: '#000000', light: '#ffffff' },
-          });
-
-          return res.json({
-            success: true,
-            checkoutUrl,
-            qrCodeUrl,
-            bookingReference,
-            provider: 'paymongo',
-            isLive: true,
-            sessionId: paymongoData.data.id,
-          });
-        } else {
-          console.warn('[MATCH&SIP] PayMongo API returned error, falling back to simulated sandbox:', paymongoData);
-        }
-      } catch (paymongoErr) {
-        console.error('[MATCH&SIP] PayMongo request exception:', paymongoErr);
-      }
-    }
-
-    // High-fidelity fallback / Sandbox mode:
-    // Generates a dedicated GCash authorization gateway checkout URL and dynamic QR code
-    const checkoutPageUrl = `/checkout/gcash-pay?reference=${bookingReference}`;
-    const fullCheckoutUrl = `${baseUrl}${checkoutPageUrl}`;
-    const qrCodeUrl = await QRCode.toDataURL(fullCheckoutUrl, {
-      margin: 2,
-      width: 320,
-      color: { dark: '#000000', light: '#ffffff' },
-    });
-
+    const status = await getMaintenanceStatus();
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
     return res.json({
       success: true,
-      checkoutUrl: checkoutPageUrl,
-      fullCheckoutUrl,
-      qrCodeUrl,
-      bookingReference,
-      provider: 'paymongo-sandbox',
-      isLive: false,
-      message: 'Checkout session created. Use QR code or button to complete GCash authorization.',
+      maintenanceMode: status.enabled,
+      message: status.message,
+      updatedAt: status.updatedAt,
+      timestamp: Date.now(),
     });
   } catch (err: any) {
-    console.error('[MATCH&SIP] Error in /api/create-checkout:', err);
     return res.status(500).json({
       success: false,
-      error: err.message || 'Failed to create payment checkout session.',
+      maintenanceMode: false,
+      error: err.message || 'Failed to query system status',
     });
   }
 });
 
 /**
- * Helper to verify PayMongo Webhook Signature (HMAC-SHA256)
+ * Real-Time SSE Stream for instant lockout / restoration across all connected devices.
  */
-function verifyWebhookSignature(
-  rawBody: string,
-  signatureHeader: string,
-  secretKey: string
-): boolean {
-  if (!signatureHeader || !secretKey) return false;
+app.get('/api/status/stream', async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  sseClients.add(res);
+
+  // Send current state immediately on connect
   try {
-    const parts = signatureHeader.split(',');
-    let timestamp = '';
-    let testSig = '';
-    let liveSig = '';
-
-    for (const part of parts) {
-      const [key, val] = part.trim().split('=');
-      if (key === 't') timestamp = val;
-      if (key === 'te') testSig = val;
-      if (key === 'li') liveSig = val;
-    }
-
-    if (!timestamp) return false;
-
-    const signaturePayload = `${timestamp}.${rawBody}`;
-    const expectedSig = crypto
-      .createHmac('sha256', secretKey)
-      .update(signaturePayload)
-      .digest('hex');
-
-    if (testSig && crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(testSig))) {
-      return true;
-    }
-    if (liveSig && crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(liveSig))) {
-      return true;
-    }
-    return false;
-  } catch (err) {
-    console.error('[MATCH&SIP] Webhook signature verification error:', err);
-    return false;
+    const status = await getMaintenanceStatus();
+    res.write(
+      `data: ${JSON.stringify({
+        maintenanceMode: status.enabled,
+        message: status.message,
+        timestamp: Date.now(),
+      })}\n\n`
+    );
+  } catch {
+    res.write(
+      `data: ${JSON.stringify({
+        maintenanceMode: false,
+        timestamp: Date.now(),
+      })}\n\n`
+    );
   }
-}
 
-/**
- * 2. BACKEND WEBHOOK INTEGRATION (/api/webhooks/payment)
- * Receives real-time POST events from PayMongo (e.g. checkout_session.payment.paid, source.chargeable).
- * Verifies signature, updates booking in Firestore to 'BOOKED', and alerts admin.
- */
-app.post('/api/webhooks/payment', async (req: any, res) => {
-  try {
-    const signatureHeader =
-      (req.headers['paymongo-signature'] as string) ||
-      (req.headers['Paymongo-Signature'] as string) ||
-      '';
-    const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET_KEY?.trim();
-
-    // Verify event signature when webhook secret is provided
-    if (webhookSecret) {
-      const rawBody = req.rawBody || JSON.stringify(req.body);
-      const isValid = verifyWebhookSignature(rawBody, signatureHeader, webhookSecret);
-      if (!isValid) {
-        console.warn('[MATCH&SIP] Webhook signature verification failed.');
-        return res.status(401).json({ error: 'Invalid webhook signature.' });
-      }
-      console.log('[MATCH&SIP] PayMongo webhook signature successfully verified.');
-    } else {
-      console.log('[MATCH&SIP] PAYMONGO_WEBHOOK_SECRET_KEY not set. Processing webhook payload.');
+  // Heartbeat ping every 25 seconds to keep connection alive through proxies
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': heartbeat\n\n');
+    } catch {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
     }
+  }, 25000);
 
-    const payload = req.body;
-    const eventType = payload?.data?.attributes?.type || payload?.type || 'payment.paid';
-    console.log(`[MATCH&SIP] Processing payment webhook event: ${eventType}`);
-
-    // Extract booking reference from diverse PayMongo payload shapes
-    const eventData = payload?.data?.attributes?.data || payload?.data || {};
-    const metadata =
-      eventData?.attributes?.metadata ||
-      payload?.data?.attributes?.metadata ||
-      payload?.metadata ||
-      {};
-
-    let bookingReference =
-      metadata?.bookingReference ||
-      eventData?.attributes?.reference_number ||
-      payload?.bookingReference ||
-      '';
-
-    // If still not found, check description for MS-XXXXXX
-    if (!bookingReference) {
-      const description =
-        eventData?.attributes?.description || payload?.data?.attributes?.description || '';
-      const match = description.match(/MS-\d{6}/);
-      if (match) {
-        bookingReference = match[0];
-      }
-    }
-
-    if (!bookingReference) {
-      console.warn('[MATCH&SIP] Webhook received but no booking reference found in payload.');
-      return res.status(200).json({ received: true, note: 'No bookingReference identified' });
-    }
-
-    console.log(`[MATCH&SIP] Payment confirmed for booking reference: #${bookingReference}`);
-
-    // Automatically update reservation status in Supabase to 'BOOKED'
-    await updateBookingFields(bookingReference, {
-      status: 'BOOKED',
-      paymentMethod: 'GCash (PayMongo)',
-    });
-
-    const bookingData = await getBookingByReference(bookingReference);
-    if (bookingData) {
-      await sendAdminNotification({
-        bookingReference: bookingData.bookingReference,
-        selectedDate: bookingData.selectedDate,
-        totalAmount: bookingData.totalAmount,
-        status: 'BOOKED',
-        customer: {
-          fullName: bookingData.customerName,
-          phoneNumber: bookingData.customerPhone,
-          email: bookingData.customerEmail,
-        },
-        slots: bookingData.slots,
-      });
-    }
-
-    console.log(`[MATCH&SIP] Booking #${bookingReference} successfully updated to BOOKED in Supabase.`);
-
-    return res.status(200).json({
-      received: true,
-      status: 'BOOKED',
-      bookingReference,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    console.error('[MATCH&SIP] Error in /api/webhooks/payment:', err);
-    return res.status(500).json({ error: err.message || 'Webhook processing failed.' });
-  }
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
 });
 
 /**
- * 3. SIMULATE GCASH PAYMENT (For testing & sandbox instant approval)
+ * Toggle maintenance mode (requires Admin PIN 0912 and confirmation phrase CONFIRM).
  */
-app.post('/api/payment/simulate-pay', async (req, res) => {
+app.post('/api/maintenance/toggle', async (req: Request, res: Response) => {
   try {
-    const { bookingReference } = req.body;
-    if (!bookingReference) {
-      return res.status(400).json({ success: false, error: 'bookingReference is required.' });
-    }
+    const { enabled, pin, confirmation, message } = req.body || {};
+    const headerPin = req.headers['x-admin-pin'] as string;
+    const providedPin = (pin || headerPin || '').trim();
+    const providedConfirm = (confirmation || '').trim().toUpperCase();
 
-    console.log(`[MATCH&SIP] Simulating GCash payment approval for #${bookingReference}`);
-    await updateBookingFields(bookingReference, {
-      status: 'BOOKED',
-      paymentMethod: 'GCash (PayMongo)',
-    });
-
-    const bookingData = await getBookingByReference(bookingReference);
-    if (bookingData) {
-      await sendAdminNotification({
-        bookingReference: bookingData.bookingReference,
-        selectedDate: bookingData.selectedDate,
-        totalAmount: bookingData.totalAmount,
-        status: 'BOOKED',
-        customer: {
-          fullName: bookingData.customerName,
-          phoneNumber: bookingData.customerPhone,
-          email: bookingData.customerEmail,
-        },
-        slots: bookingData.slots,
+    // 1. PIN verification
+    if (providedPin !== ADMIN_PIN) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: Invalid Admin PIN code.',
       });
     }
+
+    // 2. Explicit confirmation verification
+    if (providedConfirm !== 'CONFIRM') {
+      return res.status(400).json({
+        success: false,
+        error: 'Confirmation phrase "CONFIRM" is required to toggle maintenance mode.',
+      });
+    }
+
+    const targetEnabled = Boolean(enabled);
+    const updated = await setMaintenanceStatus(targetEnabled, message);
+
+    // Broadcast instant update to all connected SSE browser tabs & devices
+    broadcastMaintenanceStatus(updated.enabled, updated.message);
+
+    console.log(
+      `[MAINTENANCE] Maintenance mode toggled to: ${updated.enabled} at ${updated.updatedAt}`
+    );
 
     return res.json({
       success: true,
-      status: 'BOOKED',
-      bookingReference,
-      message: `Reservation #${bookingReference} status updated to BOOKED in Supabase.`,
+      maintenanceMode: updated.enabled,
+      message: updated.message,
+      updatedAt: updated.updatedAt,
     });
   } catch (err: any) {
-    console.error('[MATCH&SIP] Error simulating payment:', err);
+    console.error('[MAINTENANCE] Error toggling maintenance mode:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to update maintenance state',
+    });
+  }
+});
+
+// Middleware to strictly reject any booking / hold actions when maintenance mode is active
+const enforceMaintenanceBlock = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const status = await getMaintenanceStatus();
+    if (status.enabled) {
+      return res.status(503).json({
+        success: false,
+        maintenanceMode: true,
+        error:
+          status.message ||
+          'MATCH & SIP is currently under maintenance. Online court reservations are temporarily paused.',
+      });
+    }
+    next();
+  } catch {
+    next();
+  }
+};
+
+// -------------------------------------------------------------
+// 2. BOOKINGS & SLOT LOCKS API
+// -------------------------------------------------------------
+
+/**
+ * Fetch bookings (filtered by date or limit)
+ */
+app.get('/api/bookings', bookingsReadLimiter(180, 60000), async (req: Request, res: Response) => {
+  try {
+    const { date, limit } = req.query;
+    if (typeof date === 'string' && date.trim()) {
+      const bookings = await getBookingsByDate(date.trim());
+      return res.json({ success: true, bookings });
+    }
+
+    const limitNum = typeof limit === 'string' ? parseInt(limit, 10) : 250;
+    const bookings = await getAllBookings(isNaN(limitNum) ? 250 : limitNum);
+    return res.json({ success: true, bookings });
+  } catch (err: any) {
+    console.error('[API] Error fetching bookings:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to query bookings',
+    });
+  }
+});
+
+/**
+ * Save new confirmed booking with database-level concurrency locks
+ */
+app.post(
+  '/api/bookings',
+  enforceMaintenanceBlock,
+  duplicateBookingProtection,
+  bookingsWriteLimiter(30, 60000),
+  async (req: Request, res: Response) => {
+    try {
+      const bookingData = req.body;
+      if (!bookingData || !bookingData.bookingReference) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required booking data or booking reference.',
+        });
+      }
+
+      const saved = await saveBookingWithLocks(bookingData);
+      return res.json({
+        success: true,
+        booking: saved,
+      });
+    } catch (err: any) {
+      const msg = err.message || '';
+      if (
+        msg.includes('DOUBLE_BOOKING_PREVENTED') ||
+        msg.includes('SLOT_HELD_IN_PROGRESS') ||
+        msg.includes('Slot conflict')
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: msg,
+        });
+      }
+
+      console.error('[API] Error saving booking:', err);
+      return res.status(500).json({
+        success: false,
+        error: msg || 'Failed to save booking to database.',
+      });
+    }
+  }
+);
+
+/**
+ * Update an existing booking
+ */
+app.put('/api/bookings/:id', bookingsWriteLimiter(40, 60000), async (req: Request, res: Response) => {
+  try {
+    const bookingRef = req.params.id;
+    const updates = req.body;
+    const updated = await updateBookingFields(bookingRef, updates);
+    return res.json({ success: true, booking: updated });
+  } catch (err: any) {
+    console.error('[API] Error updating booking:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to update booking',
+    });
+  }
+});
+
+/**
+ * Delete a booking and release its slot locks
+ */
+app.delete('/api/bookings/:id', bookingsWriteLimiter(40, 60000), async (req: Request, res: Response) => {
+  try {
+    const bookingRef = req.params.id;
+    const deleted = await deleteBookingByReference(bookingRef);
+    return res.json({ success: true, booking: deleted });
+  } catch (err: any) {
+    console.error('[API] Error deleting booking:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to delete booking',
+    });
+  }
+});
+
+/**
+ * Hold court slots with TTL (5-minute hold during checkout)
+ */
+app.post('/api/slots/hold', enforceMaintenanceBlock, async (req: Request, res: Response) => {
+  try {
+    const { bookingReference, selectedDate, slots, customerName, ttlSeconds } = req.body || {};
+    if (!bookingReference || !selectedDate || !Array.isArray(slots) || slots.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameters for slot hold.',
+      });
+    }
+
+    const holdResult = await holdSlotsWithTtl(
+      bookingReference,
+      selectedDate,
+      slots,
+      customerName || '',
+      ttlSeconds || 300
+    );
+
+    return res.json({ success: true, ...holdResult });
+  } catch (err: any) {
+    const msg = err.message || '';
+    if (msg.includes('DOUBLE_BOOKING_PREVENTED') || msg.includes('SLOT_HELD_IN_PROGRESS')) {
+      return res.status(409).json({
+        success: false,
+        error: msg,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: msg || 'Failed to acquire slot lock',
+    });
+  }
+});
+
+/**
+ * Release temporary slot hold
+ */
+app.post('/api/slots/release', async (req: Request, res: Response) => {
+  try {
+    const { bookingReference } = req.body || {};
+    if (bookingReference) {
+      await releaseSlotHold(bookingReference);
+    }
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.json({ success: true, warning: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// 3. CHECKOUT & PAYMENT INTEGRATIONS
+// -------------------------------------------------------------
+
+app.post('/api/create-checkout', enforceMaintenanceBlock, async (req: Request, res: Response) => {
+  try {
+    const { booking } = req.body || {};
+    if (!booking || !booking.bookingReference) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing booking details for checkout initialization.',
+      });
+    }
+
+    // Default to InstaPay QR checkout for MATCH&SIP
+    return res.json({
+      success: true,
+      checkoutUrl: '',
+      qrCodeUrl: '/assets/images/INSTAPAY QR CODE.jpg',
+      bookingReference: booking.bookingReference,
+      provider: 'INSTAPAY_QR',
+      isLive: true,
+    });
+  } catch (err: any) {
+    console.error('[CHECKOUT] Error creating checkout:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to create payment checkout.',
+    });
+  }
+});
+
+app.post('/api/payment/simulate-pay', async (req: Request, res: Response) => {
+  try {
+    const { bookingReference } = req.body || {};
+    if (!bookingReference) {
+      return res.status(400).json({ success: false, error: 'Missing bookingReference' });
+    }
+
+    await updateBookingFields(bookingReference, { status: 'BOOKED' });
+    return res.json({ success: true, bookingReference });
+  } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/**
- * 4. GET BOOKING PAYMENT STATUS (/api/payment/status/:reference)
- */
-app.get('/api/payment/status/:reference', async (req, res) => {
+app.get('/api/payment/status/:ref', async (req: Request, res: Response) => {
   try {
-    const { reference } = req.params;
-    if (!reference) {
-      return res.status(400).json({ success: false, error: 'Reference parameter required' });
-    }
-
-    const booking = await getBookingByReference(reference);
-
+    const booking = await getBookingByReference(req.params.ref);
     if (!booking) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
-
     return res.json({
       success: true,
-      bookingReference: reference,
-      status: booking.status || 'PENDING',
-      isBooked: booking.status === 'BOOKED',
-      totalAmount: booking.totalAmount,
+      bookingReference: booking.bookingReference,
+      status: booking.status,
+      isBooked: booking.status === 'BOOKED' || booking.status === 'CONFIRMED',
+      selectedDate: booking.selectedDate,
       customer: {
         fullName: booking.customerName,
         phoneNumber: booking.customerPhone,
-        email: booking.customerEmail || '',
-        notes: booking.customerNotes || '',
+        email: booking.customerEmail,
+        notes: booking.customerNotes,
       },
-      selectedDate: booking.selectedDate,
       slots: booking.slots,
+      totalAmount: booking.totalAmount,
     });
   } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// 4. EMAIL NOTIFICATIONS (Resend)
+// -------------------------------------------------------------
+
+app.post('/api/notify-admin', async (req: Request, res: Response) => {
+  try {
+    const { booking } = req.body || {};
+    if (!booking) {
+      return res.status(400).json({ success: false, error: 'Missing booking payload' });
+    }
+
+    const resend = getResendClient();
+    if (!resend) {
+      console.warn('[EMAIL] RESEND_API_KEY not configured, skipping dispatch');
+      return res.json({
+        success: true,
+        message: 'Notification skipped (RESEND_API_KEY not set)',
+      });
+    }
+
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'MATCH and SIP <onboarding@resend.dev>';
+    const slotsSummary = (booking.slots || [])
+      .map((s: any) => `${s.courtName || 'Court'}: ${s.timeLabel || ''}`)
+      .join(', ');
+
+    const result = await resend.emails.send({
+      from: fromEmail,
+      to: ADMIN_EMAIL,
+      subject: `🎾 New Court Reservation: #${booking.bookingReference} (${booking.selectedDate})`,
+      html: `
+        <div style="background-color: #5E2CB2; color: #ffffff; padding: 24px; border-radius: 16px; font-family: sans-serif; max-width: 550px; margin: 0 auto;">
+          <h2 style="color: #00C6FF; margin-top: 0;">MATCH & SIP New Reservation</h2>
+          <p>A new court booking has been confirmed:</p>
+          <div style="background: rgba(255,255,255,0.1); padding: 16px; border-radius: 8px; margin: 16px 0;">
+            <p style="margin: 4px 0;"><strong>Reference:</strong> #${booking.bookingReference}</p>
+            <p style="margin: 4px 0;"><strong>Player:</strong> ${booking.customer?.fullName || booking.customerName}</p>
+            <p style="margin: 4px 0;"><strong>Phone:</strong> ${booking.customer?.phoneNumber || booking.customerPhone}</p>
+            <p style="margin: 4px 0;"><strong>Date:</strong> ${booking.selectedDate}</p>
+            <p style="margin: 4px 0;"><strong>Slots:</strong> ${slotsSummary}</p>
+            <p style="margin: 4px 0;"><strong>Total:</strong> ₱${booking.totalAmount}</p>
+            <p style="margin: 4px 0;"><strong>Status:</strong> ${booking.status || 'BOOKED'}</p>
+          </div>
+        </div>
+      `,
+    });
+
+    if (result.error) {
+      console.error('[EMAIL] Resend send error:', result.error);
+      return res.status(400).json({ success: false, error: result.error.message });
+    }
+
+    return res.json({ success: true, message: `Notification sent to ${ADMIN_EMAIL}` });
+  } catch (err: any) {
+    console.error('[EMAIL] Error dispatching notification:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // Direct Test Email Endpoint for Diagnostics
-app.post('/api/test-email', async (req, res) => {
+app.post('/api/test-email', async (_req: Request, res: Response) => {
   try {
     const resend = getResendClient();
     if (!resend) {
@@ -1024,6 +546,7 @@ app.post('/api/test-email', async (req, res) => {
     return res.json({
       success: true,
       message: `Test email sent successfully to ${ADMIN_EMAIL}`,
+      recipient: ADMIN_EMAIL,
       data: result,
     });
   } catch (err: any) {
@@ -1035,8 +558,72 @@ app.post('/api/test-email', async (req, res) => {
   }
 });
 
+// -------------------------------------------------------------
+// 5. VERSION & DEPLOYMENT CHECK
+// -------------------------------------------------------------
+
+app.get('/api/version', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return res.json({
+    version: '1.0.0',
+    buildTime: BUILD_TIME,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// -------------------------------------------------------------
+// 6. VISITOR ANALYTICS & AUDIT LOGS
+// -------------------------------------------------------------
+
+app.post('/api/analytics/track', async (req: Request, res: Response) => {
+  try {
+    const { action } = req.body || {};
+    const ip =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      'unknown';
+    const userAgent = req.headers['user-agent'] || '';
+
+    await recordAnalyticsEvent({
+      ipAddress: ip,
+      action: action || 'page_view',
+      userAgent,
+    });
+
+    return res.json({ success: true });
+  } catch {
+    return res.json({ success: true });
+  }
+});
+
+app.get('/api/analytics', async (req: Request, res: Response) => {
+  try {
+    const adminPin = req.headers['x-admin-pin'] as string;
+    if (adminPin?.trim() !== ADMIN_PIN) {
+      return res.status(401).json({ error: 'Unauthorized: Invalid Admin PIN' });
+    }
+
+    const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 250;
+    const logs = await getAnalyticsLogs(isNaN(limit) ? 250 : limit);
+
+    return res.json({
+      logs,
+      metrics: {
+        totalEvents: logs.length,
+        uniqueIps: new Set(logs.map((l: any) => l.ipAddress)).size,
+        bookingActions: logs.filter((l: any) => l.action?.includes('booking')).length,
+        slotInteractions: logs.filter((l: any) => l.action?.includes('slot')).length,
+        topActions: [],
+        topIps: [],
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to query analytics' });
+  }
+});
+
 // Global unhandled error handler middleware
-app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[UNHANDLED SERVER ERROR]', err);
   if (!res.headersSent) {
     res.status(500).json({
@@ -1046,9 +633,17 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
   }
 });
 
+// -------------------------------------------------------------
+// 7. DEV SERVER / PRODUCTION STATIC ASSET SERVING
+// -------------------------------------------------------------
+
 async function startServer() {
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.argv[1]?.endsWith('.cjs')) ||
+    Boolean(process.argv[1]?.includes('dist'));
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1056,15 +651,16 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    // Aggressive Cache-Busting: Hashed assets are immutable for 1 year;
-    // index.html, version.json, and root assets must revalidate immediately.
     app.use(
       express.static(distPath, {
         setHeaders: (res, filePath) => {
           if (filePath.includes(`${path.sep}assets${path.sep}`) || filePath.includes('/assets/')) {
             res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
           } else {
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, proxy-revalidate');
+            res.setHeader(
+              'Cache-Control',
+              'no-cache, no-store, must-revalidate, max-age=0, proxy-revalidate'
+            );
             res.setHeader('Pragma', 'no-cache');
             res.setHeader('Expires', '0');
           }
@@ -1072,15 +668,17 @@ async function startServer() {
       })
     );
     app.get('*', (_req, res) => {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, proxy-revalidate');
+      res.setHeader(
+        'Cache-Control',
+        'no-cache, no-store, must-revalidate, max-age=0, proxy-revalidate'
+      );
       res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[MATCH&SIP] Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
